@@ -2,7 +2,9 @@
 //! to `%ProgramData%\GearUps\history.csv`; at `MAX_BYTES` the file becomes
 //! `history.csv.old`, so roughly a week is kept at the default poll interval.
 //!
-//! Line format: `unix_secs,input_v,output_v,load_pct,battery_v,on_battery`.
+//! Line format: `unix_secs,input_v,output_v,load_pct,battery_v,on_battery,temp_c`.
+//! Lines written before `temp_c` was added have no last field; their
+//! temperature reads as NaN and is left out of the chart.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -23,6 +25,7 @@ pub struct Sample {
     pub load_pct: f32,
     pub battery_v: f32,
     pub on_battery: bool,
+    pub temp_c: f32,
 }
 
 impl Sample {
@@ -34,18 +37,20 @@ impl Sample {
             load_pct: s.load_pct as f32,
             battery_v: s.battery_v,
             on_battery: s.on_battery(),
+            temp_c: s.temp_c,
         }
     }
 
     fn to_line(self) -> String {
         format!(
-            "{},{:.1},{:.1},{:.0},{:.2},{}\n",
+            "{},{:.1},{:.1},{:.0},{:.2},{},{:.1}\n",
             self.t,
             self.input_v,
             self.output_v,
             self.load_pct,
             self.battery_v,
-            self.on_battery as u8
+            self.on_battery as u8,
+            self.temp_c
         )
     }
 
@@ -59,6 +64,7 @@ impl Sample {
             load_pct: next()?.parse().ok()?,
             battery_v: next()?.parse().ok()?,
             on_battery: next()? == "1",
+            temp_c: next().and_then(|v| v.parse().ok()).unwrap_or(f32::NAN),
         })
     }
 }
@@ -157,6 +163,7 @@ mod tests {
             load_pct: 12.0,
             battery_v: 27.1,
             on_battery: false,
+            temp_c: 22.0,
         };
         assert_eq!(Sample::parse(&s.to_line()), Some(s));
         let b = Sample {
@@ -176,5 +183,6 @@ mod tests {
         );
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].load_pct, 12.0);
+        assert!(v[0].temp_c.is_nan());
     }
 }

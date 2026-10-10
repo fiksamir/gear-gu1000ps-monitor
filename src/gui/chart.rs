@@ -1,5 +1,5 @@
-//! History tab: three stacked plots (voltages, load, battery) sharing the
-//! time axis, over a chosen period up to now.
+//! History tab: four stacked plots (voltages, load, battery, temperature)
+//! sharing the time axis, over a chosen period up to now.
 
 use std::ops::RangeInclusive;
 
@@ -61,7 +61,8 @@ type Segment = Vec<[f64; 2]>;
 
 /// Splits samples from `from` on into unbroken segments (a gap longer than
 /// `GAP_SECS` starts a new one) and thins each to the min and max per
-/// `bucket` seconds. X is local time in seconds (`t + offset`).
+/// `bucket` seconds. Non-finite values break the line too.
+/// X is local time in seconds (`t + offset`).
 fn segments(
     samples: &[Sample],
     from: u64,
@@ -88,12 +89,18 @@ fn segments(
     let mut prev_t: Option<u64> = None;
     let start = samples.partition_point(|s| s.t < from);
     for s in &samples[start..] {
+        let v = value(s);
+        if !v.is_finite() {
+            flush(&mut out, cur.take());
+            prev_t = None;
+            continue;
+        }
         if prev_t.is_none_or(|p| s.t.saturating_sub(p) > GAP_SECS) {
             flush(&mut out, cur.take());
             out.push(Vec::new());
         }
         prev_t = Some(s.t);
-        let pt = [(s.t as i64 + offset) as f64, value(s) as f64];
+        let pt = [(s.t as i64 + offset) as f64, v as f64];
         let id = s.t / bucket;
         match &mut cur {
             Some((b, lo, hi)) if *b == id => {
@@ -209,7 +216,7 @@ pub fn show(
 
     // Each plot sits in a card: title line, padding, border and a gap below.
     let chrome = 13.0 + 2.0 + ui.spacing().item_spacing.y + 2.0 * 16.0 + 2.0 + crate::theme::GAP;
-    let height = ((ui.available_height() - 3.0 * chrome) / 3.0).max(120.0);
+    let height = ((ui.available_height() - 4.0 * chrome) / 4.0).max(120.0);
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -267,6 +274,21 @@ pub fn show(
                     name: "Батарея",
                     color: Level::Warn.color(),
                     value: |s| s.battery_v,
+                }],
+                samples,
+                (from, bucket, offset, x_range.clone(), with_date),
+            );
+            plot(
+                ui,
+                "temperature",
+                "Температура, °C",
+                |y| format!("{y:.1} °C"),
+                height,
+                [20.0, 40.0],
+                &[Series {
+                    name: "Температура",
+                    color: Color32::from_rgb(0, 150, 136),
+                    value: |s| s.temp_c,
                 }],
                 samples,
                 (from, bucket, offset, x_range, with_date),
@@ -341,6 +363,7 @@ mod tests {
             load_pct: v,
             battery_v: v,
             on_battery: false,
+            temp_c: v,
         }
     }
 
@@ -374,6 +397,15 @@ mod tests {
         ];
         let segs = segments(&s, 0, 60, 0, |s| s.input_v);
         assert_eq!(segs, vec![vec![[10.0, 1.0], [20.0, 9.0], [60.0, 7.0]]]);
+    }
+
+    #[test]
+    fn breaks_on_missing_values() {
+        let s = [sample(0, 1.0), sample(5, f32::NAN), sample(10, 3.0)];
+        assert_eq!(
+            segments(&s, 0, 1, 0, |s| s.temp_c),
+            vec![vec![[0.0, 1.0]], vec![[10.0, 3.0]]]
+        );
     }
 
     #[test]
