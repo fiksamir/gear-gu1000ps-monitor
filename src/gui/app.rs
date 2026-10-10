@@ -93,7 +93,26 @@ fn mmss(secs: u64) -> String {
     format!("{}:{:02}", secs / 60, secs % 60)
 }
 
-fn summarize(v: &View) -> Summary {
+/// Charge (%) and minutes left while running from the battery.
+fn on_battery_estimate(st: &Status, nominal: f32, cfg: &Config) -> (u32, u32) {
+    let load_w = diagram::watts(st.load_pct, cfg.ups_power_w) as f32;
+    let charge = st.charge_on_battery_pct(nominal, load_w);
+    (
+        charge,
+        protocol::runtime_minutes(nominal, cfg.battery_ah as f32, charge, load_w),
+    )
+}
+
+fn runtime_text(minutes: u32) -> String {
+    match minutes {
+        0 => "менше хвилини".into(),
+        180.. => "понад 3 год".into(),
+        60.. => format!("~{} год {} хв", minutes / 60, minutes % 60),
+        _ => format!("~{minutes} хв"),
+    }
+}
+
+fn summarize(v: &View, cfg: &Config) -> Summary {
     let mut s = Summary {
         level: Level::Off,
         title: String::new(),
@@ -159,16 +178,18 @@ fn summarize(v: &View) -> Summary {
             "Живлення від батареї".into()
         };
         let away = snap.on_battery_secs.unwrap_or(0) + elapsed;
+        let (charge, minutes) = on_battery_estimate(&st, s.nominal, cfg);
+        let battery = format!("Заряд ~{charge} %, вистачить на {}.", runtime_text(minutes));
         s.detail = if snap.pc_shutdown_requested {
             "ПК вимикається.".into()
         } else if let Some(left) = snap.pc_shutdown_in_secs {
             format!(
-                "Мережі немає {}. ПК вимкнеться через {}.",
+                "Без мережі {}. {battery} ПК вимкнеться через {}.",
                 mmss(away),
                 mmss(left.saturating_sub(elapsed))
             )
         } else {
-            format!("Мережі немає {}. Автовимкнення ПК вимкнено.", mmss(away))
+            format!("Без мережі {}. {battery}", mmss(away))
         };
     } else {
         s.level = Level::Ok;
@@ -185,7 +206,7 @@ impl eframe::App for GuiApp {
             self.quitting = true;
         }
 
-        let summary = summarize(&self.snapshot_view());
+        let summary = summarize(&self.snapshot_view(), &self.saved);
         let mut tooltip = format!("ДБЖ GEAR — {}", summary.title);
         if let Some(st) = &summary.status {
             let w = diagram::watts(st.load_pct, self.saved.ups_power_w);
@@ -193,6 +214,13 @@ impl eframe::App for GuiApp {
                 "\nнавантаження {w} Вт ({} %), вхід {:.0} В",
                 st.load_pct, st.input_v
             );
+            if st.on_battery() {
+                let (charge, minutes) = on_battery_estimate(st, summary.nominal, &self.saved);
+                tooltip += &format!(
+                    "\nзаряд ~{charge} %, вистачить на {}",
+                    runtime_text(minutes)
+                );
+            }
         }
         if let Some(tray) = &mut self.tray {
             tray.set_state(summary.level, &tooltip);
@@ -223,7 +251,7 @@ impl eframe::App for GuiApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
         let view = self.snapshot_view();
-        let summary = summarize(&view);
+        let summary = summarize(&view, &self.saved);
 
         let header = egui::Frame::new()
             .fill(theme::BG)
@@ -389,18 +417,30 @@ impl GuiApp {
 
     /// Battery, load and temperature as tiles with gauges.
     fn tiles(&self, ui: &mut egui::Ui, st: &Status, nominal: f32) {
-        let charge = st.charge_estimate_pct(nominal);
-        let (battery_note, battery_color) = if st.battery_low() {
-            ("Низький заряд".to_string(), Level::Alarm.color())
-        } else if st.on_battery() {
-            (format!("Розряджається · ~{charge} %"), Level::Warn.color())
+        let volts = format!("{:.1} В", st.battery_v);
+        let (battery_value, battery_fill, battery_note) = if st.on_battery() {
+            let (charge, minutes) = on_battery_estimate(st, nominal, &self.saved);
+            (
+                format!("~{charge} %"),
+                charge as f32 / 100.0,
+                format!("{volts} · вистачить на {}", runtime_text(minutes)),
+            )
+        } else if st.battery_float(nominal) {
+            ("100 %".to_string(), 1.0, format!("{volts} · на підзарядці"))
         } else {
-            ("Заряджена, на підзарядці".to_string(), Level::Ok.color())
+            let charge = st.charge_estimate_pct(nominal);
+            (
+                "Заряджається".to_string(),
+                charge as f32 / 100.0,
+                format!("{volts} · ~{charge} %"),
+            )
         };
-        let battery_fill = if st.on_battery() || st.battery_low() {
-            charge as f32 / 100.0
+        let battery_color = if st.battery_low() {
+            Level::Alarm.color()
+        } else if st.on_battery() {
+            Level::Warn.color()
         } else {
-            1.0
+            Level::Ok.color()
         };
         let load_color = match st.load_pct {
             0..=59 => Level::Ok.color(),
@@ -417,7 +457,7 @@ impl GuiApp {
                 &mut cols[0],
                 "🔋",
                 "БАТАРЕЯ",
-                &format!("{:.1} В", st.battery_v),
+                &battery_value,
                 (battery_fill, battery_color),
                 &battery_note,
             );
@@ -559,6 +599,23 @@ impl GuiApp {
                     "Активна потужність з етикетки ДБЖ, наприклад «1000VA / 600W» → 600.",
                 )
                 .color(theme::WEAK),
+            );
+            ui.horizontal(|ui| {
+                ui.label("Ємність батареї (для оцінки часу роботи)");
+                theme::stepper(
+                    ui,
+                    "battery_ah",
+                    &mut f.battery_ah,
+                    1.0,
+                    500.0,
+                    1.0,
+                    0,
+                    "А·год",
+                );
+            });
+            ui.label(
+                RichText::new("Ємність одного блоку з наклейки на батареї. У GU-1000PS зазвичай 2 × 12 В 7 А·год → 7.")
+                    .color(theme::WEAK),
             );
         });
 

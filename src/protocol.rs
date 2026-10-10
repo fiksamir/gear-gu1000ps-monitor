@@ -119,10 +119,58 @@ impl Status {
     /// Rough charge estimate from battery voltage. Only meaningful on battery:
     /// on mains the charger holds the float voltage regardless of charge.
     pub fn charge_estimate_pct(&self, nominal_battery_v: f32) -> u32 {
+        self.charge_on_battery_pct(nominal_battery_v, 0.0)
+    }
+
+    /// Charge estimate on battery that adds back the voltage the battery
+    /// loses to its internal resistance while feeding `load_w` watts.
+    pub fn charge_on_battery_pct(&self, nominal_battery_v: f32, load_w: f32) -> u32 {
         let cells = (nominal_battery_v / 2.0).max(1.0);
-        let per_cell = self.battery_v / cells;
+        let amps = battery_amps(nominal_battery_v, load_w);
+        let per_cell = self.battery_v / cells + amps * CELL_RESISTANCE_OHM;
         (((per_cell - 1.75) / (2.10 - 1.75)).clamp(0.0, 1.0) * 100.0).round() as u32
     }
+
+    /// True when the charger holds the battery at its float voltage, i.e. the
+    /// battery is (practically) full.
+    pub fn battery_float(&self, nominal_battery_v: f32) -> bool {
+        let cells = (nominal_battery_v / 2.0).max(1.0);
+        self.battery_v / cells >= FLOAT_CELL_V
+    }
+}
+
+/// Inverter efficiency used to turn output watts into battery current.
+const INVERTER_EFFICIENCY: f32 = 0.85;
+/// Internal resistance of one lead-acid cell of a small (7 Ah) battery.
+const CELL_RESISTANCE_OHM: f32 = 0.004;
+/// Per-cell voltage at and above which the charger is floating.
+const FLOAT_CELL_V: f32 = 2.22;
+/// Peukert exponent of a sealed lead-acid battery and its rating period.
+const PEUKERT_K: f32 = 1.15;
+const PEUKERT_RATED_HOURS: f32 = 20.0;
+/// Below this the inverter's own consumption dominates.
+const MIN_LOAD_W: f32 = 20.0;
+
+fn battery_amps(nominal_battery_v: f32, load_w: f32) -> f32 {
+    load_w.max(0.0) / (INVERTER_EFFICIENCY * nominal_battery_v.max(1.0))
+}
+
+/// Rough minutes the battery lasts at `load_w` from `charge_pct`, by
+/// Peukert's law: big loads get less out of a lead-acid battery than its
+/// rated ampere-hours.
+pub fn runtime_minutes(
+    nominal_battery_v: f32,
+    battery_ah: f32,
+    charge_pct: u32,
+    load_w: f32,
+) -> u32 {
+    if battery_ah <= 0.0 {
+        return 0;
+    }
+    let amps = battery_amps(nominal_battery_v, load_w.max(MIN_LOAD_W));
+    let full_hours =
+        PEUKERT_RATED_HOURS * (battery_ah / (amps * PEUKERT_RATED_HOURS)).powf(PEUKERT_K);
+    (full_hours * 60.0 * charge_pct.min(100) as f32 / 100.0).round() as u32
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -216,5 +264,25 @@ mod tests {
         assert_eq!(effective_delay_secs(0.9), 54);
         assert_eq!(effective_delay_secs(1.0), 60);
         assert_eq!(effective_delay_secs(10.0), 600);
+    }
+
+    #[test]
+    fn runtime_follows_load_and_charge() {
+        // 2 x 12 V 7 Ah: about an hour at 100 W, a few minutes at full load.
+        let light = runtime_minutes(24.0, 7.0, 100, 100.0);
+        let heavy = runtime_minutes(24.0, 7.0, 100, 600.0);
+        assert!((45..=75).contains(&light), "{light}");
+        assert!((4..=10).contains(&heavy), "{heavy}");
+        assert_eq!(
+            runtime_minutes(24.0, 7.0, 50, 100.0),
+            (light as f32 / 2.0).round() as u32
+        );
+        assert_eq!(runtime_minutes(24.0, 0.0, 100, 100.0), 0);
+    }
+
+    #[test]
+    fn load_raises_charge_estimate() {
+        let s = Status::parse("(000.0 000.0 220.0 050 50.0 23.4 22.0 10001000").unwrap();
+        assert!(s.charge_on_battery_pct(24.0, 300.0) > s.charge_estimate_pct(24.0));
     }
 }

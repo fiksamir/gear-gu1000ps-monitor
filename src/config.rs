@@ -31,6 +31,8 @@ pub struct Config {
     /// Rated active power of the UPS, for showing the load in watts (the UPS
     /// itself reports load only in percent).
     pub ups_power_w: u32,
+    /// Capacity of one battery block, Ah, for the runtime estimate.
+    pub battery_ah: f64,
 }
 
 impl Default for Config {
@@ -44,6 +46,7 @@ impl Default for Config {
             ups_return_when_on_battery: true,
             skip_when_update_pending: true,
             ups_power_w: 600,
+            battery_ah: 7.0,
         }
     }
 }
@@ -99,6 +102,7 @@ impl Config {
         self.poll_interval_secs = self.poll_interval_secs.clamp(1, 60);
         self.ups_off_delay_min = self.ups_off_delay_min.clamp(0.5, 10.0);
         self.ups_power_w = self.ups_power_w.clamp(100, 10_000);
+        self.battery_ah = self.battery_ah.clamp(1.0, 500.0);
         self
     }
 }

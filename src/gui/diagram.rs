@@ -186,7 +186,7 @@ pub fn show(ui: &mut egui::Ui, s: &Status, nominal_battery_v: f32, ups_power_w: 
         inverter_fill,
     );
 
-    let charge = s.charge_estimate_pct(nominal_battery_v);
+    let charge = s.charge_on_battery_pct(nominal_battery_v, watts(s.load_pct, ups_power_w) as f32);
     let (bars, battery_color) = if from_battery {
         (
             charge.div_ceil(25).clamp(1, 4),
