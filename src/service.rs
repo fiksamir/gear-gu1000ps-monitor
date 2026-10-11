@@ -27,6 +27,9 @@ pub const SERVICE_NAME: &str = "GearUps";
 /// shutdown with Fast Startup; kept short so a later sleep is not mistaken).
 const PRESHUTDOWN_EVENT_WINDOW_SECS: u32 = 300;
 const SUSPEND_EVENT_WINDOW_SECS: u32 = 120;
+/// How far back winlogon's hibernate request (event 187) may be when the
+/// suspend notification arrives; it is logged a fraction of a second before.
+const HYBRID_EVENT_WINDOW_SECS: u32 = 30;
 
 define_windows_service!(ffi_service_main, service_main);
 
@@ -56,7 +59,7 @@ fn run_service() -> windows_service::Result<()> {
         }
         ServiceControl::Preshutdown => {
             if let Ok(mut m) = handler_monitor.lock() {
-                m.on_power_down("завершення роботи", PRESHUTDOWN_EVENT_WINDOW_SECS);
+                m.on_power_down("завершення роботи", PRESHUTDOWN_EVENT_WINDOW_SECS, false);
             }
             let _ = stop_tx.send(());
             ServiceControlHandlerResult::NoError
@@ -64,7 +67,9 @@ fn run_service() -> windows_service::Result<()> {
         ServiceControl::PowerEvent(param) => {
             if let Ok(mut m) = handler_monitor.lock() {
                 match param {
-                    PowerEventParam::Suspend => m.on_power_down("сон", SUSPEND_EVENT_WINDOW_SECS),
+                    PowerEventParam::Suspend => {
+                        m.on_power_down("сон", SUSPEND_EVENT_WINDOW_SECS, true)
+                    }
                     PowerEventParam::ResumeAutomatic | PowerEventParam::ResumeSuspend => {
                         m.on_resume()
                     }
@@ -328,7 +333,9 @@ impl Monitor {
 
     /// Called when Windows is about to power down. Turns the UPS output off
     /// only for a positively identified power-off, never for restart or sleep.
-    fn on_power_down(&mut self, source: &str, window_secs: u32) {
+    /// `suspend`: also accept winlogon's hybrid-shutdown request, the only
+    /// trace a Fast Startup shutdown leaves after a Fast Startup boot.
+    fn on_power_down(&mut self, source: &str, window_secs: u32, suspend: bool) {
         if !self.cfg.ups_off_on_pc_shutdown || self.ups_off_sent {
             return;
         }
@@ -357,6 +364,25 @@ impl Monitor {
                     ShutdownKind::Unknown
                 }
             }
+        };
+        let kind = if suspend && kind == ShutdownKind::Unknown {
+            match winutil::hybrid_shutdown_requested(HYBRID_EVENT_WINDOW_SECS) {
+                Ok(true) => {
+                    log(&format!(
+                        "{source}: winlogon запросив гібридне вимкнення (подія 187)"
+                    ));
+                    ShutdownKind::PowerOff
+                }
+                Ok(false) => kind,
+                Err(e) => {
+                    log(&format!(
+                        "{source}: не вдається прочитати журнал подій: {e}"
+                    ));
+                    kind
+                }
+            }
+        } else {
+            kind
         };
         if kind != ShutdownKind::PowerOff {
             log(&format!(

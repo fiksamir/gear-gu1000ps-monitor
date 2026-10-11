@@ -10,14 +10,19 @@ mod diagram;
 mod theme;
 mod tray;
 
-use std::ptr::null;
+use std::ptr::{null, null_mut};
 use std::sync::Arc;
 
 use eframe::egui;
-use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS, POINT, RECT};
+use windows_sys::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    MONITOR_DEFAULTTOPRIMARY,
+};
 use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, IsIconic, IsWindowVisible, SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
+    FindWindowW, GetWindowRect, IsIconic, IsWindowVisible, IsZoomed, SetForegroundWindow,
+    SetWindowPos, ShowWindow, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_RESTORE, SW_SHOW,
     SW_SHOWNOACTIVATE,
 };
 
@@ -54,6 +59,59 @@ pub fn show_window(activate: bool) {
         } else {
             ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         }
+    }
+}
+
+/// Hides the main window to the tray through Win32. Must match
+/// `show_window`: winit does not see Win32 visibility changes, so after one
+/// it skips `ViewportCommand::Visible(false)` as already hidden.
+pub fn hide_window() {
+    let title = wide(TITLE);
+    let hwnd = unsafe { FindWindowW(null(), title.as_ptr()) };
+    if !hwnd.is_null() {
+        unsafe { ShowWindow(hwnd, SW_HIDE) };
+    }
+}
+
+/// Centers the main window in the primary monitor's work area unless it is
+/// already on that monitor. Keeps the size; a maximized window is restored
+/// first, since moving it would not take it off its monitor.
+pub fn move_to_primary_monitor() {
+    let title = wide(TITLE);
+    let hwnd = unsafe { FindWindowW(null(), title.as_ptr()) };
+    if hwnd.is_null() {
+        return;
+    }
+    unsafe {
+        let current = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let primary = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
+        if current == primary {
+            return;
+        }
+        let mut info: MONITORINFO = std::mem::zeroed();
+        info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        let mut rect: RECT = std::mem::zeroed();
+        if GetMonitorInfoW(primary, &mut info) == 0 || GetWindowRect(hwnd, &mut rect) == 0 {
+            return;
+        }
+        if IsZoomed(hwnd) != 0 {
+            ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            ShowWindow(hwnd, SW_RESTORE);
+            GetWindowRect(hwnd, &mut rect);
+        }
+        let work = info.rcWork;
+        let (w, h) = (rect.right - rect.left, rect.bottom - rect.top);
+        let x = work.left + ((work.right - work.left - w) / 2).max(0);
+        let y = work.top + ((work.bottom - work.top - h) / 2).max(0);
+        SetWindowPos(
+            hwnd,
+            null_mut(),
+            x,
+            y,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
     }
 }
 

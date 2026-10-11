@@ -227,10 +227,13 @@ impl eframe::App for GuiApp {
         }
         // Bring the window up (without taking focus) when real power trouble
         // starts; not for service/USB start-up states, which happen every boot.
+        // A secondary monitor may not be on the UPS and go dark, so the
+        // window moves to the primary one first.
         let alarm = summary.status.as_ref().is_some_and(|s| {
             s.on_battery() || s.battery_low() || s.ups_failed() || s.shutdown_active()
         });
         if alarm && self.last_alarm == Some(false) {
+            crate::move_to_primary_monitor();
             crate::show_window(false);
         }
         if summary.status.is_some() {
@@ -248,7 +251,7 @@ impl eframe::App for GuiApp {
         if ctx.input(|i| i.viewport().close_requested()) {
             // The close button hides to the tray; "Вийти" in the tray menu quits.
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            crate::hide_window();
         }
         let view = self.snapshot_view();
         let summary = summarize(&view, &self.saved);

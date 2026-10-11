@@ -150,6 +150,54 @@ pub fn recent_shutdown_events(max_age_secs: u32, limit: usize) -> io::Result<Vec
     Ok(out)
 }
 
+/// True when winlogon asked for a hibernate-type power action (Kernel-Power
+/// event 187) within `max_age_secs`. That is how a "Shut down" with Fast
+/// Startup begins; Windows logs no 1074 for it when the PC was last started
+/// from such a shutdown, i.e. for every shutdown but the first after a cold
+/// boot. Sleep never goes this way, and cutting power during a real
+/// hibernate is harmless.
+pub fn hybrid_shutdown_requested(max_age_secs: u32) -> io::Result<bool> {
+    let query = wide(&format!(
+        "*[System[Provider[@Name='Microsoft-Windows-Kernel-Power'] and (EventID=187) \
+         and TimeCreated[timediff(@SystemTime) <= {}]]]",
+        max_age_secs as u64 * 1000
+    ));
+    let channel = wide("System");
+    let results = unsafe {
+        EvtQuery(
+            0,
+            channel.as_ptr(),
+            query.as_ptr(),
+            EvtQueryChannelPath | EvtQueryReverseDirection,
+        )
+    };
+    if results == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut found = false;
+    for _ in 0..10 {
+        let mut ev = 0isize;
+        let mut returned = 0u32;
+        if unsafe { EvtNext(results, 1, &mut ev, 1000, 0, &mut returned) } == 0 || returned == 0 {
+            break;
+        }
+        found = render_xml(ev).is_some_and(|xml| is_winlogon_hibernate(&xml));
+        unsafe { EvtClose(ev) };
+        if found {
+            break;
+        }
+    }
+    unsafe { EvtClose(results) };
+    Ok(found)
+}
+
+/// Event 187 from winlogon.exe with SystemAction 3 (PowerActionHibernate).
+fn is_winlogon_hibernate(xml: &str) -> bool {
+    let caller = xml_data(xml, "ApiCallerName").unwrap_or_default();
+    caller.to_lowercase().ends_with("\\winlogon.exe")
+        && xml_data(xml, "SystemAction").as_deref() == Some("3")
+}
+
 fn render_xml(ev: isize) -> Option<String> {
     let mut used = 0u32;
     let mut props = 0u32;
@@ -311,5 +359,21 @@ mod tests {
         );
         assert_eq!(xml_data(xml, "param1").as_deref(), Some("C:\\x.exe"));
         assert_eq!(xml_data(xml, "param9"), None);
+    }
+
+    #[test]
+    fn recognizes_hybrid_shutdown_call() {
+        let event = |caller: &str, action: &str| {
+            format!(
+                r#"<Event><EventData><Data Name="ApiCallerName">{caller}</Data><Data Name="SystemAction">{action}</Data><Data Name="LightestSystemState">2</Data></EventData></Event>"#
+            )
+        };
+        let winlogon = r"\Device\HarddiskVolume3\Windows\System32\winlogon.exe";
+        assert!(is_winlogon_hibernate(&event(winlogon, "3")));
+        assert!(!is_winlogon_hibernate(&event(winlogon, "2")));
+        assert!(!is_winlogon_hibernate(&event(
+            r"\Device\HarddiskVolume3\Windows\explorer.exe",
+            "3"
+        )));
     }
 }
