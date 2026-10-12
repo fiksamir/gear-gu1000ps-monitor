@@ -206,8 +206,14 @@ impl Monitor {
             .map_err(|e| e.to_string())
             .and_then(|r| Status::parse(&r).map(|s| (r, s)))
         {
-            Ok((raw, s)) => {
+            Ok((raw, mut s)) => {
                 self.track_freshness(raw);
+                s.charge_pct = self
+                    .ups
+                    .as_ref()?
+                    .command(protocol::IDX_CHARGE)
+                    .ok()
+                    .and_then(|r| protocol::parse_charge(&r));
                 Some(s)
             }
             Err(e) => {

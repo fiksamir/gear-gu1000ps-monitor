@@ -438,6 +438,13 @@ impl GuiApp {
                 charge as f32 / 100.0,
                 format!("{volts} · вистачить на {}", runtime_text(minutes)),
             )
+        } else if let Some(charge) = st.charge_pct {
+            let what = if charge >= 100 { "на підзарядці" } else { "заряджається" };
+            (
+                format!("{charge} %"),
+                charge as f32 / 100.0,
+                format!("{volts} · {what}"),
+            )
         } else if st.battery_float(nominal) {
             ("100 %".to_string(), 1.0, format!("{volts} · на підзарядці"))
         } else {

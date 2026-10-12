@@ -18,6 +18,8 @@ pub const IDX_RATINGS: u32 = 0x0d;
 pub const IDX_CANCEL: u32 = 0x0a;
 /// Q: toggle the beeper; the new state is status bit 7.
 pub const IDX_BEEPER_TOGGLE: u32 = 0x07;
+/// Battery charge, "BL075". Not in NUT; polled by the vendor's upsSmartView.
+pub const IDX_CHARGE: u32 = 0xf3;
 
 /// Descriptor index for "S<n>R0000" (stay off) or "S<n>R<m>" (come back when
 /// mains returns, after ~10 s). `delay_min` is clamped to 0.5..=10 minutes.
@@ -56,6 +58,15 @@ pub struct Status {
     /// Raw status bits, b7 first: utility fail, battery low, AVR active,
     /// UPS failed, line-interactive, test, shutdown active, beeper on.
     pub bits: [bool; 8],
+    /// Charge reported by the UPS itself (index 0xf3), filled in separately.
+    #[serde(default)]
+    pub charge_pct: Option<u32>,
+}
+
+/// Parses the 0xf3 reply, "BL075\r" = 75 %.
+pub fn parse_charge(reply: &str) -> Option<u32> {
+    let pct: u32 = trim_reply(reply).strip_prefix("BL")?.parse().ok()?;
+    (pct <= 100).then_some(pct)
 }
 
 fn trim_reply(reply: &str) -> &str {
@@ -93,6 +104,7 @@ impl Status {
             battery_v: num(5)?,
             temp_c: num(6)?,
             bits,
+            charge_pct: None,
         })
     }
 
@@ -118,15 +130,19 @@ impl Status {
         self.bits[7]
     }
 
-    /// Rough charge estimate from battery voltage. Only meaningful on battery:
-    /// on mains the charger holds the float voltage regardless of charge.
+    /// The UPS's own charge reading, else a rough estimate from battery
+    /// voltage (only meaningful on battery: on mains the charger holds the
+    /// float voltage regardless of charge).
     pub fn charge_estimate_pct(&self, nominal_battery_v: f32) -> u32 {
         self.charge_on_battery_pct(nominal_battery_v, 0.0)
     }
 
-    /// Charge estimate on battery that adds back the voltage the battery
-    /// loses to its internal resistance while feeding `load_w` watts.
+    /// Like `charge_estimate_pct`; the voltage estimate adds back the voltage
+    /// the battery loses to its internal resistance while feeding `load_w` watts.
     pub fn charge_on_battery_pct(&self, nominal_battery_v: f32, load_w: f32) -> u32 {
+        if let Some(pct) = self.charge_pct {
+            return pct;
+        }
         let cells = (nominal_battery_v / 2.0).max(1.0);
         let amps = battery_amps(nominal_battery_v, load_w);
         let per_cell = self.battery_v / cells + amps * CELL_RESISTANCE_OHM;
@@ -280,6 +296,17 @@ mod tests {
             (light as f32 / 2.0).round() as u32
         );
         assert_eq!(runtime_minutes(24.0, 0.0, 100, 100.0), 0);
+    }
+
+    #[test]
+    fn parses_ups_charge() {
+        assert_eq!(parse_charge("BL075\r"), Some(75));
+        assert_eq!(parse_charge("BL100\r"), Some(100));
+        assert_eq!(parse_charge(""), None);
+        assert_eq!(parse_charge("BL999\r"), None);
+        let mut s = Status::parse("(229.0 000.0 228.0 011 50.0 26.1 30.0 00001001\r").unwrap();
+        s.charge_pct = Some(90);
+        assert_eq!(s.charge_on_battery_pct(24.0, 300.0), 90);
     }
 
     #[test]
