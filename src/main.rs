@@ -190,7 +190,11 @@ fn battery_test() -> Result<(), String> {
         let s = read_status(&ups)?;
         println!(
             "тест: {}, вихід {:.0} В, батарея {:.1} В",
-            if s.test_in_progress() { "триває" } else { "ні" },
+            if s.test_in_progress() {
+                "триває"
+            } else {
+                "ні"
+            },
             s.output_v,
             s.battery_v
         );

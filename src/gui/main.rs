@@ -178,7 +178,7 @@ fn main() -> eframe::Result<()> {
             exit_on_session_end();
             theme::apply(&cc.egui_ctx);
             let view = backend::spawn_poller(cc.egui_ctx.clone());
-            Ok(Box::new(app::GuiApp::new(cc, view)))
+            Ok(Box::new(app::GuiApp::new(cc, view, start_hidden)))
         }),
     )
 }

@@ -22,6 +22,8 @@ const OUTCOME_OK_TTL: Duration = Duration::from_secs(8);
 const OUTCOME_ERR_TTL: Duration = Duration::from_secs(20);
 /// Frame interval while the power-flow diagram is animating.
 const ANIMATION_FRAME: Duration = Duration::from_millis(50);
+/// How long after a `--tray` start the window is hidden again if it shows.
+const START_HIDE_WINDOW: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -40,6 +42,9 @@ pub struct GuiApp {
     chart_order: Vec<chart::Kind>,
     quitting: bool,
     last_alarm: Option<bool>,
+    /// Started with `--tray`: eframe still shows the window after its first
+    /// frame, so it is hidden again once it appears (within this deadline).
+    hide_until: Option<Instant>,
     outcome: Outcome,
     confirm_test: bool,
     saved: Config,
@@ -59,7 +64,11 @@ struct Summary {
 }
 
 impl GuiApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, view: Arc<Mutex<View>>) -> GuiApp {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        view: Arc<Mutex<View>>,
+        start_hidden: bool,
+    ) -> GuiApp {
         let requests = Arc::new(Requests::default());
         let tray = Tray::new(&cc.egui_ctx, Arc::clone(&requests)).ok();
         let (saved, settings_msg) = match Config::read() {
@@ -78,6 +87,7 @@ impl GuiApp {
             chart_order: chart::load_order(),
             quitting: false,
             last_alarm: None,
+            hide_until: start_hidden.then(|| Instant::now() + START_HIDE_WINDOW),
             outcome: Outcome::default(),
             confirm_test: false,
             form: saved.clone(),
@@ -226,7 +236,17 @@ fn summarize(v: &View, cfg: &Config) -> Summary {
 }
 
 impl eframe::App for GuiApp {
-    fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if let Some(until) = self.hide_until {
+            if crate::window_on_screen() {
+                crate::hide_window();
+                self.hide_until = None;
+            } else if Instant::now() >= until {
+                self.hide_until = None;
+            } else {
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
+        }
         if self.requests.quit.swap(false, Ordering::SeqCst) {
             self.quitting = true;
         }
