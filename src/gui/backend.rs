@@ -184,6 +184,17 @@ pub fn cancel_ups_shutdown(outcome: &Outcome, ctx: &eframe::egui::Context) {
     });
 }
 
+/// Toggles the UPS beeper. Sent exactly once: a retry would toggle back.
+/// The UPS does not report the result (status bit 7 ignores the toggle).
+pub fn toggle_ups_beeper(outcome: &Outcome, ctx: &eframe::egui::Context) {
+    run_action(outcome, ctx, || {
+        let ups = Ups::open().map_err(|e| e.to_string())?;
+        ups.command_once(protocol::IDX_BEEPER_TOGGLE)
+            .map_err(|e| format!("ДБЖ не прийняв команду: {e}"))?;
+        Ok("Команду надіслано. Перевірте значок звуку на екрані ДБЖ.".into())
+    });
+}
+
 pub fn test_ups_off(outcome: &Outcome, ctx: &eframe::egui::Context, minutes: f64) {
     run_action(outcome, ctx, move || {
         let ups = Ups::open().map_err(|e| e.to_string())?;

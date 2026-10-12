@@ -16,6 +16,8 @@ pub const IDX_INFO: u32 = 0x0c;
 pub const IDX_RATINGS: u32 = 0x0d;
 /// C: cancel a pending shutdown.
 pub const IDX_CANCEL: u32 = 0x0a;
+/// Q: toggle the beeper; the new state is status bit 7.
+pub const IDX_BEEPER_TOGGLE: u32 = 0x07;
 
 /// Descriptor index for "S<n>R0000" (stay off) or "S<n>R<m>" (come back when
 /// mains returns, after ~10 s). `delay_min` is clamped to 0.5..=10 minutes.
@@ -112,6 +114,8 @@ impl Status {
     pub fn shutdown_active(&self) -> bool {
         self.bits[6]
     }
+    /// Unreliable on this UPS: it ignores the beeper toggle.
+    /// Unreliable on this UPS: it ignores the beeper toggle.
     pub fn beeper_on(&self) -> bool {
         self.bits[7]
     }

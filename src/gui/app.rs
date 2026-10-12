@@ -44,6 +44,7 @@ pub struct GuiApp {
     saved: Config,
     form: Config,
     settings_msg: Option<Result<String, String>>,
+    beeper_outcome: Outcome,
     /// The result message on screen and when it first appeared.
     outcome_since: Option<(Result<String, String>, Instant)>,
 }
@@ -80,6 +81,7 @@ impl GuiApp {
             form: saved.clone(),
             saved,
             settings_msg,
+            beeper_outcome: Outcome::default(),
             outcome_since: None,
         }
     }
@@ -304,7 +306,7 @@ impl eframe::App for GuiApp {
                         );
                     }
                 }
-                Tab::Settings => self.settings_tab(ui),
+                Tab::Settings => self.settings_tab(ui, &ctx, summary.status.as_ref()),
                 Tab::Log => log_tab(ui, &view),
             });
 
@@ -520,10 +522,48 @@ impl GuiApp {
         });
     }
 
-    fn settings_tab(&mut self, ui: &mut egui::Ui) {
+    fn settings_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, status: Option<&Status>) {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
-            .show(ui, |ui| self.settings_form(ui));
+            .show(ui, |ui| {
+                self.settings_form(ui);
+                self.beeper_card(ui, ctx, status);
+            });
+    }
+
+    /// The beeper lives in the UPS, not in config.toml, and the UPS does not
+    /// report its state reliably (status bit 7 ignores the toggle), so this is
+    /// a plain toggle button and the UPS display shows the result.
+    fn beeper_card(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, status: Option<&Status>) {
+        let result = self.beeper_outcome.lock().ok().and_then(|o| o.clone());
+        theme::card(ui, "ЗВУК ДБЖ", |ui| {
+            if status.is_none() {
+                ui.label(RichText::new("Немає зв'язку з ДБЖ.").color(theme::WEAK));
+                return;
+            }
+            if ui.button("Перемкнути звук ДБЖ").clicked() {
+                if let Ok(mut o) = self.beeper_outcome.lock() {
+                    *o = None;
+                }
+                backend::toggle_ups_beeper(&self.beeper_outcome, ctx);
+            }
+            ui.label(
+                RichText::new(
+                    "Вмикає або вимикає звукові сигнали ДБЖ (зникнення мережі, низький заряд, \
+                     перевантаження). Поточний стан видно на екрані ДБЖ: ДБЖ не повідомляє його програмі.",
+                )
+                .color(theme::WEAK),
+            );
+            match &result {
+                Some(Ok(m)) => {
+                    ui.label(RichText::new(m).color(Level::Ok.color()));
+                }
+                Some(Err(e)) => {
+                    ui.label(RichText::new(e).color(Level::Alarm.color()));
+                }
+                None => {}
+            }
+        });
     }
 
     fn settings_form(&mut self, ui: &mut egui::Ui) {

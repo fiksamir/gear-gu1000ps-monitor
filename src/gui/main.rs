@@ -10,7 +10,7 @@ mod diagram;
 mod theme;
 mod tray;
 
-use std::ptr::{null, null_mut};
+use std::ptr::null;
 use std::sync::Arc;
 
 use eframe::egui;
@@ -21,9 +21,9 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, GetWindowRect, IsIconic, IsWindowVisible, IsZoomed, SetForegroundWindow,
-    SetWindowPos, ShowWindow, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_RESTORE, SW_SHOW,
-    SW_SHOWNOACTIVATE,
+    FindWindowW, GetWindowPlacement, IsIconic, IsWindowVisible, SetForegroundWindow,
+    SetWindowPlacement, ShowWindow, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE,
+    WINDOWPLACEMENT,
 };
 
 use gear_ups::winutil::wide;
@@ -74,8 +74,10 @@ pub fn hide_window() {
 }
 
 /// Centers the main window in the primary monitor's work area unless it is
-/// already on that monitor. Keeps the size; a maximized window is restored
-/// first, since moving it would not take it off its monitor.
+/// already on that monitor, and shows it there without taking focus.
+/// Works through the window placement, so a minimized, maximized or hidden
+/// window also comes back on the primary monitor in its normal size: moving
+/// the minimized or maximized rectangle would not.
 pub fn move_to_primary_monitor() {
     let title = wide(TITLE);
     let hwnd = unsafe { FindWindowW(null(), title.as_ptr()) };
@@ -83,6 +85,7 @@ pub fn move_to_primary_monitor() {
         return;
     }
     unsafe {
+        // For a minimized window this is the monitor of its normal position.
         let current = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
         let primary = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
         if current == primary {
@@ -90,28 +93,27 @@ pub fn move_to_primary_monitor() {
         }
         let mut info: MONITORINFO = std::mem::zeroed();
         info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
-        let mut rect: RECT = std::mem::zeroed();
-        if GetMonitorInfoW(primary, &mut info) == 0 || GetWindowRect(hwnd, &mut rect) == 0 {
+        let mut wp: WINDOWPLACEMENT = std::mem::zeroed();
+        wp.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
+        if GetMonitorInfoW(primary, &mut info) == 0 || GetWindowPlacement(hwnd, &mut wp) == 0 {
             return;
         }
-        if IsZoomed(hwnd) != 0 {
-            ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-            ShowWindow(hwnd, SW_RESTORE);
-            GetWindowRect(hwnd, &mut rect);
-        }
+        // rcNormalPosition is in workspace coordinates, whose origin is the
+        // top-left corner of the primary monitor's work area.
         let work = info.rcWork;
-        let (w, h) = (rect.right - rect.left, rect.bottom - rect.top);
-        let x = work.left + ((work.right - work.left - w) / 2).max(0);
-        let y = work.top + ((work.bottom - work.top - h) / 2).max(0);
-        SetWindowPos(
-            hwnd,
-            null_mut(),
-            x,
-            y,
-            0,
-            0,
-            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-        );
+        let r = wp.rcNormalPosition;
+        let (w, h) = (r.right - r.left, r.bottom - r.top);
+        let x = ((work.right - work.left - w) / 2).max(0);
+        let y = ((work.bottom - work.top - h) / 2).max(0);
+        wp.rcNormalPosition = RECT {
+            left: x,
+            top: y,
+            right: x + w,
+            bottom: y + h,
+        };
+        wp.showCmd = SW_SHOWNOACTIVATE as u32;
+        wp.flags = 0;
+        SetWindowPlacement(hwnd, &wp);
     }
 }
 

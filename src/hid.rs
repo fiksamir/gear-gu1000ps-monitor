@@ -81,29 +81,39 @@ impl Ups {
         }
     }
 
-    /// Issues one command (string descriptor request) and returns the reply.
+    /// Issues one command (string descriptor request) and returns the reply,
+    /// retrying failed requests. Not for toggles: a retry would undo them.
     pub fn command(&self, index: u32) -> io::Result<String> {
         let mut last_err = io::Error::other("no attempt made");
         for attempt in 0..3 {
             if attempt > 0 {
                 sleep(Duration::from_millis(100));
             }
-            let mut buf = [0u16; 128];
-            let ok = unsafe {
-                HidD_GetIndexedString(
-                    self.handle,
-                    index,
-                    buf.as_mut_ptr().cast(),
-                    (buf.len() * 2) as u32,
-                )
-            } != 0;
-            if ok {
-                let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-                return Ok(String::from_utf16_lossy(&buf[..len]));
+            match self.command_once(index) {
+                Ok(reply) => return Ok(reply),
+                Err(e) => last_err = e,
             }
-            last_err = io::Error::last_os_error();
         }
         Err(last_err)
+    }
+
+    /// Issues one command exactly once.
+    pub fn command_once(&self, index: u32) -> io::Result<String> {
+        let mut buf = [0u16; 128];
+        let ok = unsafe {
+            HidD_GetIndexedString(
+                self.handle,
+                index,
+                buf.as_mut_ptr().cast(),
+                (buf.len() * 2) as u32,
+            )
+        } != 0;
+        if ok {
+            let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+            Ok(String::from_utf16_lossy(&buf[..len]))
+        } else {
+            Err(io::Error::last_os_error())
+        }
     }
 }
 

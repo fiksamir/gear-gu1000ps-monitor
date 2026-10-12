@@ -438,7 +438,6 @@ pub fn flags(s: &Status) -> Vec<&'static str> {
         (s.ups_failed(), "НЕСПРАВНІСТЬ"),
         (s.test_in_progress(), "ТЕСТ"),
         (s.shutdown_active(), "ЗАПЛАНОВАНО ВИМКНЕННЯ"),
-        (s.beeper_on(), "ЗВУК УВІМКНЕНО"),
     ]
     .into_iter()
     .filter_map(|(on, name)| on.then_some(name))
