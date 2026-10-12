@@ -209,7 +209,10 @@ fn summarize(v: &View, cfg: &Config) -> Summary {
         s.detail = "ПК захищено.".into();
     }
     if cfg.temp_alarm_c > 0 && st.temp_c >= cfg.temp_alarm_c as f32 {
-        let hot = format!("ДБЖ гарячий: {:.0} °C (поріг {} °C).", st.temp_c, cfg.temp_alarm_c);
+        let hot = format!(
+            "ДБЖ гарячий: {:.0} °C (поріг {} °C).",
+            st.temp_c, cfg.temp_alarm_c
+        );
         if s.level == Level::Ok {
             s.level = Level::Warn;
             s.title = "ДБЖ перегрівається".into();
@@ -345,27 +348,58 @@ impl GuiApp {
         view: &View,
         summary: &Summary,
     ) {
-        if let Some(st) = &summary.status {
-            theme::card(ui, "СХЕМА ЖИВЛЕННЯ", |ui| {
-                if diagram::show(ui, st, summary.nominal, self.saved.ups_power_w)
-                    && crate::window_on_screen()
-                {
-                    ctx.request_repaint_after(ANIMATION_FRAME);
-                }
-                if view.direct.is_some() {
-                    ui.label(
-                        RichText::new("Дані зчитано напряму: служба не працює.").color(theme::WEAK),
-                    );
-                }
-            });
-            self.tiles(ui, st, summary.nominal);
-            theme::card(ui, "ІНДИКАТОРИ", |ui| diagram::indicators(ui, st));
-        } else {
-            theme::card(ui, "", |ui| {
-                ui.label(RichText::new("Немає даних від ДБЖ.").color(theme::WEAK));
-            });
+        match &summary.status {
+            // Wide window: the diagram on the left, numbers and buttons on
+            // the right, so everything fits without scrolling.
+            Some(st) if ui.available_width() >= theme::WIDE_MIN => {
+                ui.columns(2, |cols| {
+                    let (left, right) = cols.split_at_mut(1);
+                    let (left, right) = (&mut left[0], &mut right[0]);
+                    self.diagram_card(left, ctx, view, st, summary.nominal);
+                    theme::card(left, "ІНДИКАТОРИ", |ui| {
+                        diagram::indicators(ui, st)
+                    });
+                    self.tiles(right, st, summary.nominal);
+                    self.controls(right, ctx, view, summary);
+                });
+                return;
+            }
+            Some(st) => {
+                self.diagram_card(ui, ctx, view, st, summary.nominal);
+                self.tiles(ui, st, summary.nominal);
+                theme::card(ui, "ІНДИКАТОРИ", |ui| diagram::indicators(ui, st));
+            }
+            None => {
+                theme::card(ui, "", |ui| {
+                    ui.label(RichText::new("Немає даних від ДБЖ.").color(theme::WEAK));
+                });
+            }
         }
+        self.controls(ui, ctx, view, summary);
+    }
 
+    fn diagram_card(
+        &self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        view: &View,
+        st: &Status,
+        nominal: f32,
+    ) {
+        theme::card(ui, "СХЕМА ЖИВЛЕННЯ", |ui| {
+            if diagram::show(ui, st, nominal, self.saved.ups_power_w) && crate::window_on_screen() {
+                ctx.request_repaint_after(ANIMATION_FRAME);
+            }
+            if view.direct.is_some() {
+                ui.label(
+                    RichText::new("Дані зчитано напряму: служба не працює.").color(theme::WEAK),
+                );
+            }
+        });
+    }
+
+    /// Service and UPS control cards, and the result of the last action.
+    fn controls(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, view: &View, summary: &Summary) {
         ui.columns(2, |cols| {
             theme::card(&mut cols[0], "СЛУЖБА GEARUPS", |ui| {
                 let (text, color) = match view.service {
@@ -452,7 +486,11 @@ impl GuiApp {
                 format!("{volts} · вистачить на {}", runtime_text(minutes)),
             )
         } else if let Some(charge) = st.charge_pct {
-            let what = if charge >= 100 { "на підзарядці" } else { "заряджається" };
+            let what = if charge >= 100 {
+                "на підзарядці"
+            } else {
+                "заряджається"
+            };
             (
                 format!("{charge} %"),
                 charge as f32 / 100.0,
@@ -554,8 +592,16 @@ impl GuiApp {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                self.settings_form(ui);
-                self.beeper_card(ui, ctx, status);
+                if ui.available_width() >= theme::WIDE_MIN {
+                    ui.columns(2, |cols| {
+                        let (left, right) = cols.split_at_mut(1);
+                        self.settings_form(&mut left[0]);
+                        self.beeper_card(&mut right[0], ctx, status);
+                    });
+                } else {
+                    self.settings_form(ui);
+                    self.beeper_card(ui, ctx, status);
+                }
             });
     }
 
@@ -671,7 +717,7 @@ impl GuiApp {
             });
             ui.label(
                 RichText::new(
-                    "Активна потужність з етикетки ДБЖ, наприклад «1000VA / 600W» → 600.",
+                    "Активна потужність з етикетки ДБЖ, наприклад «1000VA / 600W»: вкажіть 600.",
                 )
                 .color(theme::WEAK),
             );
@@ -689,7 +735,7 @@ impl GuiApp {
                 );
             });
             ui.label(
-                RichText::new("Ємність одного блоку з наклейки на батареї. У GU-1000PS зазвичай 2 × 12 В 7 А·год → 7.")
+                RichText::new("Ємність одного блоку з наклейки на батареї. У GU-1000PS зазвичай 2 × 12 В 7 А·год: вкажіть 7.")
                     .color(theme::WEAK),
             );
             ui.horizontal(|ui| {

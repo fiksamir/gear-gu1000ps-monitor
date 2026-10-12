@@ -5,8 +5,8 @@ use std::ops::RangeInclusive;
 
 use eframe::egui::{self, Color32, RichText};
 use egui_plot::{
-    uniform_grid_spacer, Corner, GridInput, GridMark, HoverPosition, Legend, Line, Plot,
-    PlotPoint, Text,
+    uniform_grid_spacer, Corner, GridInput, GridMark, HoverPosition, Legend, Line, Plot, PlotPoint,
+    Text,
 };
 use windows_sys::Win32::Foundation::SYSTEMTIME;
 use windows_sys::Win32::System::SystemInformation::GetLocalTime;
@@ -292,14 +292,106 @@ pub fn show(
     // Each plot sits in a card: title row with the move buttons, padding,
     // border and a gap below.
     let chrome = 20.0 + 2.0 + ui.spacing().item_spacing.y + 2.0 * 16.0 + 2.0 + crate::theme::GAP;
-    let n = order.len() as f32;
-    let height = ((ui.available_height() - n * chrome) / n).max(120.0);
+    // A wide window shows the plots two per row, in reading order.
+    let cols = if ui.available_width() >= crate::theme::WIDE_MIN {
+        2
+    } else {
+        1
+    };
+    let rows = order.len().div_ceil(cols) as f32;
+    // `ui.columns` adds its own spacing below each row.
+    let row_chrome = chrome
+        + if cols > 1 {
+            ui.spacing().item_spacing.y
+        } else {
+            0.0
+        };
+    let height = ((ui.available_height() - rows * row_chrome) / rows).max(120.0);
     let mut moved: Option<(usize, usize)> = None;
+    let draw = |ui: &mut egui::Ui, kind: Kind, ctx: PlotCtx| match kind {
+        Kind::Voltage => plot(
+            ui,
+            kind,
+            "Напруга, В",
+            |y| format!("{y:.1} В"),
+            20.0,
+            &[
+                Series {
+                    name: "Вхід (мережа)",
+                    color: blue,
+                    value: |s| s.input_v,
+                },
+                Series {
+                    name: "Вихід",
+                    color: Level::Ok.color(),
+                    value: |s| s.output_v,
+                },
+            ],
+            ctx,
+        ),
+        Kind::Load => plot(
+            ui,
+            kind,
+            "Навантаження, %",
+            move |y| {
+                format!(
+                    "{y:.0} % (~{} Вт)",
+                    (y / 100.0 * ups_power_w as f64).round()
+                )
+            },
+            20.0,
+            &[Series {
+                name: "Навантаження",
+                color: Color32::from_rgb(171, 71, 188),
+                value: |s| s.load_pct,
+            }],
+            ctx,
+        ),
+        Kind::Battery => plot(
+            ui,
+            kind,
+            "Батарея, В",
+            |y| format!("{y:.2} В"),
+            nominal * 0.05,
+            &[Series {
+                name: "Батарея",
+                color: Level::Warn.color(),
+                value: |s| s.battery_v,
+            }],
+            ctx,
+        ),
+        Kind::Charge => plot(
+            ui,
+            kind,
+            "Заряд батареї, %",
+            |y| format!("{y:.0} %"),
+            20.0,
+            &[Series {
+                name: "Заряд (від ДБЖ)",
+                color: Color32::from_rgb(67, 160, 71),
+                value: |s| s.charge_pct,
+            }],
+            ctx,
+        ),
+        Kind::Temperature => plot(
+            ui,
+            kind,
+            "Температура, °C",
+            |y| format!("{y:.1} °C"),
+            10.0,
+            &[Series {
+                name: "Температура",
+                color: Color32::from_rgb(0, 150, 136),
+                value: |s| s.temp_c,
+            }],
+            ctx,
+        ),
+    };
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
             let last = order.len() - 1;
-            for (i, &kind) in order.iter().enumerate() {
+            let mut cell = |ui: &mut egui::Ui, i: usize| {
                 let ctx = PlotCtx {
                     samples,
                     height,
@@ -311,89 +403,23 @@ pub fn show(
                     can_up: i > 0,
                     can_down: i < last,
                 };
-                let mv = match kind {
-                    Kind::Voltage => plot(
-                        ui,
-                        kind,
-                        "Напруга, В",
-                        |y| format!("{y:.1} В"),
-                        20.0,
-                        &[
-                            Series {
-                                name: "Вхід (мережа)",
-                                color: blue,
-                                value: |s| s.input_v,
-                            },
-                            Series {
-                                name: "Вихід",
-                                color: Level::Ok.color(),
-                                value: |s| s.output_v,
-                            },
-                        ],
-                        ctx,
-                    ),
-                    Kind::Load => plot(
-                        ui,
-                        kind,
-                        "Навантаження, %",
-                        move |y| {
-                            format!(
-                                "{y:.0} % (~{} Вт)",
-                                (y / 100.0 * ups_power_w as f64).round()
-                            )
-                        },
-                        20.0,
-                        &[Series {
-                            name: "Навантаження",
-                            color: Color32::from_rgb(171, 71, 188),
-                            value: |s| s.load_pct,
-                        }],
-                        ctx,
-                    ),
-                    Kind::Battery => plot(
-                        ui,
-                        kind,
-                        "Батарея, В",
-                        |y| format!("{y:.2} В"),
-                        nominal * 0.05,
-                        &[Series {
-                            name: "Батарея",
-                            color: Level::Warn.color(),
-                            value: |s| s.battery_v,
-                        }],
-                        ctx,
-                    ),
-                    Kind::Charge => plot(
-                        ui,
-                        kind,
-                        "Заряд батареї, %",
-                        |y| format!("{y:.0} %"),
-                        20.0,
-                        &[Series {
-                            name: "Заряд (від ДБЖ)",
-                            color: Color32::from_rgb(67, 160, 71),
-                            value: |s| s.charge_pct,
-                        }],
-                        ctx,
-                    ),
-                    Kind::Temperature => plot(
-                        ui,
-                        kind,
-                        "Температура, °C",
-                        |y| format!("{y:.1} °C"),
-                        10.0,
-                        &[Series {
-                            name: "Температура",
-                            color: Color32::from_rgb(0, 150, 136),
-                            value: |s| s.temp_c,
-                        }],
-                        ctx,
-                    ),
-                };
-                match mv {
+                match draw(ui, order[i], ctx) {
                     Some(Move::Up) => moved = Some((i, i - 1)),
                     Some(Move::Down) => moved = Some((i, i + 1)),
                     None => {}
+                }
+            };
+            for first in (0..order.len()).step_by(cols) {
+                if cols == 1 {
+                    cell(ui, first);
+                } else {
+                    ui.columns(cols, |c| {
+                        for (j, ui) in c.iter_mut().enumerate() {
+                            if first + j < order.len() {
+                                cell(ui, first + j);
+                            }
+                        }
+                    });
                 }
             }
         });
@@ -423,7 +449,9 @@ struct PlotCtx<'a> {
 /// Y range that fits every line of the period, at least `min_span` tall so
 /// small jitter is not blown up, with headroom for the value labels.
 fn fit_y(lines: &[(&Series, Vec<Segment>)], min_span: f64) -> RangeInclusive<f64> {
-    let ys = lines.iter().flat_map(|(_, segs)| segs.iter().flatten().map(|p| p[1]));
+    let ys = lines
+        .iter()
+        .flat_map(|(_, segs)| segs.iter().flatten().map(|p| p[1]));
     let (lo, hi) = ys.fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), y| {
         (lo.min(y), hi.max(y))
     });
@@ -436,7 +464,11 @@ fn fit_y(lines: &[(&Series, Vec<Segment>)], min_span: f64) -> RangeInclusive<f64
     let (lo, hi) = (lo.min(mid - span / 2.0), hi.max(mid + span / 2.0));
     let bottom = lo - span * 0.1;
     // Values that are never negative should not get a negative axis.
-    let bottom = if non_negative { bottom.max(0.0) } else { bottom };
+    let bottom = if non_negative {
+        bottom.max(0.0)
+    } else {
+        bottom
+    };
     bottom..=hi + span * 0.3
 }
 

@@ -17,6 +17,8 @@ const TRACK: Color32 = Color32::from_rgb(230, 233, 238);
 
 /// Vertical gap between cards.
 pub const GAP: f32 = 10.0;
+/// Page width from which tabs lay their cards out in two columns.
+pub const WIDE_MIN: f32 = 900.0;
 const CARD_MARGIN: i8 = 14;
 
 /// Applies the theme to every style egui keeps (light and dark).

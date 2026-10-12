@@ -275,9 +275,11 @@ pub fn indicators(ui: &mut egui::Ui, s: &Status) {
         ("Триває тест", s.test_in_progress(), warn),
         ("Заплановано вимкнення", s.shutdown_active(), alarm),
     ];
-    ui.columns(3, |cols| {
+    // Three lamps per row need about 560 px; a half-width card gets two.
+    let n = if ui.available_width() >= 560.0 { 3 } else { 2 };
+    ui.columns(n, |cols| {
         for (i, (label, on, color)) in lamps.into_iter().enumerate() {
-            crate::theme::lamp(&mut cols[i % 3], label, on, color);
+            crate::theme::lamp(&mut cols[i % n], label, on, color);
         }
     });
 }

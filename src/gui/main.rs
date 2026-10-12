@@ -165,7 +165,7 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(TITLE)
-            .with_inner_size([720.0, 980.0])
+            .with_inner_size([1100.0, 830.0])
             .with_min_inner_size([560.0, 520.0])
             .with_icon(Arc::new(icon))
             .with_visible(!start_hidden),

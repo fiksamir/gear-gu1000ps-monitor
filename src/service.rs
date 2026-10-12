@@ -319,7 +319,10 @@ impl Monitor {
 
         let limit = self.cfg.temp_alarm_c as f32;
         if limit > 0.0 && !self.hot && s.temp_c >= limit {
-            log(&format!("ДБЖ гарячий: {:.0} °C (поріг {limit:.0} °C)", s.temp_c));
+            log(&format!(
+                "ДБЖ гарячий: {:.0} °C (поріг {limit:.0} °C)",
+                s.temp_c
+            ));
             self.hot = true;
         } else if self.hot && (limit == 0.0 || s.temp_c <= limit - 3.0) {
             log(&format!("температура ДБЖ знизилась до {:.0} °C", s.temp_c));
@@ -381,9 +384,7 @@ impl Monitor {
             pc_shutdown_requested: self.pc_shutdown_requested,
             ups_off_sent: self.ups_off_sent,
             poll_interval_secs: self.cfg.poll_interval_secs,
-            frozen_secs: self
-                .frozen
-                .then(|| self.raw_changed_at.elapsed().as_secs()),
+            frozen_secs: self.frozen.then(|| self.raw_changed_at.elapsed().as_secs()),
         });
     }
 

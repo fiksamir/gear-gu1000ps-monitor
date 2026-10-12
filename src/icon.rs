@@ -20,14 +20,13 @@ const AA: u32 = 4;
 
 fn in_bolt(x: f32, y: f32) -> bool {
     let mut inside = false;
-    let mut j = BOLT.len() - 1;
-    for i in 0..BOLT.len() {
-        let (xi, yi) = BOLT[i];
-        let (xj, yj) = BOLT[j];
+    let mut prev = BOLT[BOLT.len() - 1];
+    for (xi, yi) in BOLT {
+        let (xj, yj) = prev;
         if (yi > y) != (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi {
             inside = !inside;
         }
-        j = i;
+        prev = (xi, yi);
     }
     inside
 }

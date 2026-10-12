@@ -75,18 +75,17 @@ impl Tray {
         }));
         let c = ctx.clone();
         TrayIconEvent::set_event_handler(Some(move |e: TrayIconEvent| {
-            let open = match e {
+            let open = matches!(
+                e,
                 TrayIconEvent::Click {
                     button: MouseButton::Left,
                     button_state: MouseButtonState::Up,
                     ..
-                } => true,
-                TrayIconEvent::DoubleClick {
+                } | TrayIconEvent::DoubleClick {
                     button: MouseButton::Left,
                     ..
-                } => true,
-                _ => false,
-            };
+                }
+            );
             if open {
                 crate::show_window(true);
                 c.request_repaint();
