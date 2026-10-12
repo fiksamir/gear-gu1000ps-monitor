@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, RichText};
 
 use gear_ups::config::Config;
+use gear_ups::events::{self, Kind as EventKind};
 use gear_ups::protocol::{self, Status};
 use gear_ups::snapshot;
 
@@ -29,6 +30,7 @@ const START_HIDE_WINDOW: Duration = Duration::from_secs(5);
 enum Tab {
     Status,
     Chart,
+    Events,
     Settings,
     Log,
 }
@@ -321,6 +323,7 @@ impl eframe::App for GuiApp {
                     &[
                         (Tab::Status, "🏠  Стан"),
                         (Tab::Chart, "📈  Графік"),
+                        (Tab::Events, "⚡  Події"),
                         (Tab::Settings, "⚙  Налаштування"),
                         (Tab::Log, "☰  Журнал"),
                     ],
@@ -351,6 +354,7 @@ impl eframe::App for GuiApp {
                     }
                 }
                 Tab::Settings => self.settings_tab(ui, &ctx, summary.status.as_ref()),
+                Tab::Events => events_tab(ui, &view),
                 Tab::Log => log_tab(ui, &view),
             });
 
@@ -805,6 +809,53 @@ impl GuiApp {
             None => {}
         }
     }
+}
+
+/// Power cuts and other notable events from the service log, newest first.
+fn events_tab(ui: &mut egui::Ui, view: &View) {
+    let now = snapshot::unix_now();
+    let local_now = now as i64 + chart::utc_offset_secs(now);
+    let (count, secs) = events::outages_since(&view.events, local_now - 30 * 86400);
+    theme::card(ui, "ЗА 30 ДНІВ", |ui| {
+        ui.label(if count == 0 {
+            "Відключень мережі не було.".to_string()
+        } else {
+            format!(
+                "Відключень мережі: {count}, від батареї загалом {}.",
+                events::duration_text(secs)
+            )
+        });
+    });
+    theme::card(ui, "ПОДІЇ", |ui| {
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if view.events.is_empty() {
+                    ui.label(RichText::new("Подій ще не було.").color(theme::WEAK));
+                }
+                for e in view.events.iter().rev() {
+                    let color = match e.kind {
+                        EventKind::PowerLost | EventKind::BatteryLow | EventKind::Fault => {
+                            Level::Alarm.color()
+                        }
+                        k if k.is_problem() => Level::Warn.color(),
+                        _ => Level::Ok.color(),
+                    };
+                    let mut title = e.title.to_string();
+                    if let Some(s) = e.on_battery_secs {
+                        title += &format!(" · від батареї {}", events::duration_text(s));
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(&e.time[..16]).monospace().color(theme::WEAK));
+                        theme::lamp(ui, &title, true, color);
+                    });
+                    if !e.detail.is_empty() {
+                        ui.label(RichText::new(&e.detail).size(12.0).color(theme::WEAK));
+                    }
+                    ui.add_space(4.0);
+                }
+            });
+    });
 }
 
 fn log_tab(ui: &mut egui::Ui, view: &View) {

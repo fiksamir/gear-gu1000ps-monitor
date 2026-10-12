@@ -123,7 +123,7 @@ fn segments(
 }
 
 /// Local time minus UTC, in seconds, rounded to a quarter hour.
-fn utc_offset_secs(now: u64) -> i64 {
+pub(crate) fn utc_offset_secs(now: u64) -> i64 {
     let mut t: SYSTEMTIME = unsafe { std::mem::zeroed() };
     unsafe { GetLocalTime(&mut t) };
     let local = t.wHour as i64 * 3_600 + t.wMinute as i64 * 60 + t.wSecond as i64;

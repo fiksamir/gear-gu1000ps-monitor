@@ -12,6 +12,7 @@ use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
+use gear_ups::events::{self, Event};
 use gear_ups::hid::Ups;
 use gear_ups::history::{self, Sample};
 use gear_ups::protocol::{self, Ratings, Status};
@@ -41,6 +42,8 @@ pub struct View {
     /// Read straight from the UPS while the service is not running.
     pub direct: Option<Result<(Status, f32), String>>,
     pub log: Arc<Vec<String>>,
+    /// Notable events of the whole log, oldest first.
+    pub events: Arc<Vec<Event>>,
     /// Readings for the chart: the service's history file plus what this
     /// window read directly while the service was stopped.
     pub history: Arc<Mutex<history::Reader>>,
@@ -69,7 +72,10 @@ pub fn spawn_poller(ctx: eframe::egui::Context) -> Arc<Mutex<View>> {
             let modified = std::fs::metadata(&log_path).and_then(|m| m.modified()).ok();
             let new_log = (modified != log_modified).then(|| {
                 log_modified = modified;
-                Arc::new(tail(&log_path))
+                let text = std::fs::read(&log_path)
+                    .map(|b| String::from_utf8_lossy(&b).into_owned())
+                    .unwrap_or_default();
+                (Arc::new(tail(&text)), Arc::new(events::parse(&text)))
             });
             if let Ok(mut h) = history.lock() {
                 h.refresh();
@@ -81,8 +87,9 @@ pub fn spawn_poller(ctx: eframe::egui::Context) -> Arc<Mutex<View>> {
                 v.service = service;
                 v.snapshot = snapshot;
                 v.direct = direct;
-                if let Some(log) = new_log {
+                if let Some((log, events)) = new_log {
                     v.log = log;
+                    v.events = events;
                 }
             }
             ctx.request_repaint();
@@ -135,11 +142,7 @@ fn read_direct(ups: &mut Option<(Ups, f32)>) -> Result<(Status, f32), String> {
     }
 }
 
-fn tail(path: &std::path::Path) -> Vec<String> {
-    let Ok(bytes) = std::fs::read(path) else {
-        return Vec::new();
-    };
-    let text = String::from_utf8_lossy(&bytes);
+fn tail(text: &str) -> Vec<String> {
     let lines: Vec<&str> = text.lines().collect();
     lines[lines.len().saturating_sub(LOG_LINES)..]
         .iter()
