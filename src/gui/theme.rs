@@ -128,7 +128,7 @@ pub fn card<R>(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui) -
     r
 }
 
-fn caption(ui: &mut egui::Ui, text: &str) {
+pub fn caption(ui: &mut egui::Ui, text: &str) {
     ui.label(RichText::new(text).size(12.5).strong().color(WEAK));
 }
 

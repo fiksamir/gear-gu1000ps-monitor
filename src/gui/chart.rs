@@ -1,11 +1,12 @@
 //! History tab: four stacked plots (voltages, load, battery, temperature)
-//! sharing the time axis, over a chosen period up to now.
+//! sharing the time axis, over a chosen period up to now, in a user-set order.
 
 use std::ops::RangeInclusive;
 
 use eframe::egui::{self, Color32, RichText};
 use egui_plot::{
     uniform_grid_spacer, Corner, GridInput, GridMark, HoverPosition, Legend, Line, Plot,
+    PlotPoint, Text,
 };
 use windows_sys::Win32::Foundation::SYSTEMTIME;
 use windows_sys::Win32::System::SystemInformation::GetLocalTime;
@@ -183,10 +184,75 @@ struct Series {
     value: fn(&Sample) -> f32,
 }
 
+/// One of the stacked plots; the user can reorder them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Kind {
+    Voltage,
+    Load,
+    Battery,
+    Temperature,
+}
+
+impl Kind {
+    pub const ALL: [Kind; 4] = [Kind::Voltage, Kind::Load, Kind::Battery, Kind::Temperature];
+
+    fn key(self) -> &'static str {
+        match self {
+            Kind::Voltage => "voltage",
+            Kind::Load => "load",
+            Kind::Battery => "battery",
+            Kind::Temperature => "temperature",
+        }
+    }
+}
+
+/// Chart order is a per-user view preference, kept outside config.toml.
+fn order_path() -> Option<std::path::PathBuf> {
+    let dir = std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("GearUps");
+    Some(dir.join("chart_order.txt"))
+}
+
+/// Saved order; unknown names are dropped and missing plots appended.
+pub fn load_order() -> Vec<Kind> {
+    let text = order_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .unwrap_or_default();
+    parse_order(&text)
+}
+
+fn parse_order(text: &str) -> Vec<Kind> {
+    let mut order: Vec<Kind> = Vec::new();
+    for name in text.split(',') {
+        if let Some(k) = Kind::ALL.into_iter().find(|k| k.key() == name.trim()) {
+            if !order.contains(&k) {
+                order.push(k);
+            }
+        }
+    }
+    for k in Kind::ALL {
+        if !order.contains(&k) {
+            order.push(k);
+        }
+    }
+    order
+}
+
+fn save_order(order: &[Kind]) {
+    let Some(path) = order_path() else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let text: Vec<&str> = order.iter().map(|k| k.key()).collect();
+    let _ = std::fs::write(path, text.join(","));
+}
+
 pub fn show(
     ui: &mut egui::Ui,
     samples: &[Sample],
     period: &mut Period,
+    order: &mut [Kind],
     nominal_battery_v: f32,
     ups_power_w: u32,
     now: u64,
@@ -213,104 +279,165 @@ pub fn show(
     let x_range = (from as i64 + offset) as f64..=(now as i64 + offset) as f64;
     let with_date = span > DAY as u64 / 2;
     let blue = Color32::from_rgb(66, 133, 244);
+    let nominal = nominal_battery_v as f64;
 
-    // Each plot sits in a card: title line, padding, border and a gap below.
-    let chrome = 13.0 + 2.0 + ui.spacing().item_spacing.y + 2.0 * 16.0 + 2.0 + crate::theme::GAP;
-    let height = ((ui.available_height() - 4.0 * chrome) / 4.0).max(120.0);
+    // Each plot sits in a card: title row with the move buttons, padding,
+    // border and a gap below.
+    let chrome = 20.0 + 2.0 + ui.spacing().item_spacing.y + 2.0 * 16.0 + 2.0 + crate::theme::GAP;
+    let n = order.len() as f32;
+    let height = ((ui.available_height() - n * chrome) / n).max(120.0);
+    let mut moved: Option<(usize, usize)> = None;
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            plot(
-                ui,
-                "voltage",
-                "Напруга, В",
-                |y| format!("{y:.1} В"),
-                height,
-                [0.0, 250.0],
-                &[
-                    Series {
-                        name: "Вхід (мережа)",
-                        color: blue,
-                        value: |s| s.input_v,
-                    },
-                    Series {
-                        name: "Вихід",
-                        color: Level::Ok.color(),
-                        value: |s| s.output_v,
-                    },
-                ],
-                samples,
-                (from, bucket, offset, x_range.clone(), with_date),
-            );
-            plot(
-                ui,
-                "load",
-                "Навантаження, %",
-                move |y| {
-                    format!(
-                        "{y:.0} % (~{} Вт)",
-                        (y / 100.0 * ups_power_w as f64).round()
-                    )
-                },
-                height,
-                [0.0, 100.0],
-                &[Series {
-                    name: "Навантаження",
-                    color: Color32::from_rgb(171, 71, 188),
-                    value: |s| s.load_pct,
-                }],
-                samples,
-                (from, bucket, offset, x_range.clone(), with_date),
-            );
-            let nominal = nominal_battery_v as f64;
-            plot(
-                ui,
-                "battery",
-                "Батарея, В",
-                |y| format!("{y:.2} В"),
-                height,
-                [nominal * 0.85, nominal * 1.2],
-                &[Series {
-                    name: "Батарея",
-                    color: Level::Warn.color(),
-                    value: |s| s.battery_v,
-                }],
-                samples,
-                (from, bucket, offset, x_range.clone(), with_date),
-            );
-            plot(
-                ui,
-                "temperature",
-                "Температура, °C",
-                |y| format!("{y:.1} °C"),
-                height,
-                [20.0, 40.0],
-                &[Series {
-                    name: "Температура",
-                    color: Color32::from_rgb(0, 150, 136),
-                    value: |s| s.temp_c,
-                }],
-                samples,
-                (from, bucket, offset, x_range, with_date),
-            );
+            let last = order.len() - 1;
+            for (i, &kind) in order.iter().enumerate() {
+                let ctx = PlotCtx {
+                    samples,
+                    height,
+                    from,
+                    bucket,
+                    offset,
+                    x_range: x_range.clone(),
+                    with_date,
+                    can_up: i > 0,
+                    can_down: i < last,
+                };
+                let mv = match kind {
+                    Kind::Voltage => plot(
+                        ui,
+                        kind,
+                        "Напруга, В",
+                        |y| format!("{y:.1} В"),
+                        [0.0, 250.0],
+                        &[
+                            Series {
+                                name: "Вхід (мережа)",
+                                color: blue,
+                                value: |s| s.input_v,
+                            },
+                            Series {
+                                name: "Вихід",
+                                color: Level::Ok.color(),
+                                value: |s| s.output_v,
+                            },
+                        ],
+                        ctx,
+                    ),
+                    Kind::Load => plot(
+                        ui,
+                        kind,
+                        "Навантаження, %",
+                        move |y| {
+                            format!(
+                                "{y:.0} % (~{} Вт)",
+                                (y / 100.0 * ups_power_w as f64).round()
+                            )
+                        },
+                        [0.0, 100.0],
+                        &[Series {
+                            name: "Навантаження",
+                            color: Color32::from_rgb(171, 71, 188),
+                            value: |s| s.load_pct,
+                        }],
+                        ctx,
+                    ),
+                    Kind::Battery => plot(
+                        ui,
+                        kind,
+                        "Батарея, В",
+                        |y| format!("{y:.2} В"),
+                        [nominal * 0.85, nominal * 1.2],
+                        &[Series {
+                            name: "Батарея",
+                            color: Level::Warn.color(),
+                            value: |s| s.battery_v,
+                        }],
+                        ctx,
+                    ),
+                    Kind::Temperature => plot(
+                        ui,
+                        kind,
+                        "Температура, °C",
+                        |y| format!("{y:.1} °C"),
+                        [20.0, 40.0],
+                        &[Series {
+                            name: "Температура",
+                            color: Color32::from_rgb(0, 150, 136),
+                            value: |s| s.temp_c,
+                        }],
+                        ctx,
+                    ),
+                };
+                match mv {
+                    Some(Move::Up) => moved = Some((i, i - 1)),
+                    Some(Move::Down) => moved = Some((i, i + 1)),
+                    None => {}
+                }
+            }
         });
+    if let Some((a, b)) = moved {
+        order.swap(a, b);
+        save_order(order);
+    }
 }
 
-#[allow(clippy::too_many_arguments)]
+enum Move {
+    Up,
+    Down,
+}
+
+struct PlotCtx<'a> {
+    samples: &'a [Sample],
+    height: f32,
+    from: u64,
+    bucket: u64,
+    offset: i64,
+    x_range: RangeInclusive<f64>,
+    with_date: bool,
+    can_up: bool,
+    can_down: bool,
+}
+
+/// Draws one plot card and returns the move the user asked for, if any.
 fn plot(
     ui: &mut egui::Ui,
-    id: &str,
+    kind: Kind,
     title: &str,
-    value_text: impl Fn(f64) -> String + 'static,
-    height: f32,
+    value_text: impl Fn(f64) -> String + Clone + 'static,
     include_y: [f64; 2],
     series: &[Series],
-    samples: &[Sample],
-    (from, bucket, offset, x_range, with_date): (u64, u64, i64, RangeInclusive<f64>, bool),
-) {
-    crate::theme::card(ui, &title.to_uppercase(), |ui| {
-        Plot::new(id)
-            .height(height)
+    c: PlotCtx<'_>,
+) -> Option<Move> {
+    let mut mv = None;
+    crate::theme::card(ui, "", |ui| {
+        ui.horizontal(|ui| {
+            crate::theme::caption(ui, &title.to_uppercase());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add_enabled(c.can_down, egui::Button::new("⬇").small())
+                    .on_hover_text("Опустити графік")
+                    .clicked()
+                {
+                    mv = Some(Move::Down);
+                }
+                if ui
+                    .add_enabled(c.can_up, egui::Button::new("⬆").small())
+                    .on_hover_text("Підняти графік")
+                    .clicked()
+                {
+                    mv = Some(Move::Up);
+                }
+            });
+        });
+        let lines: Vec<(&Series, Vec<Segment>)> = series
+            .iter()
+            .map(|s| (s, segments(c.samples, c.from, c.bucket, c.offset, s.value)))
+            .collect();
+        let hover_text = value_text.clone();
+        let with_date = c.with_date;
+        Plot::new(kind.key())
+            .height(c.height)
             .legend(Legend::default().position(Corner::LeftTop))
             .allow_drag(false)
             .allow_zoom(false)
@@ -334,21 +461,33 @@ fn plot(
                     ..
                 } if !plot_name.is_empty() => Some(format!(
                     "{plot_name}: {}\n{}",
-                    value_text(position.y),
+                    hover_text(position.y),
                     clock(position.x, true)
                 )),
                 HoverPosition::NearDataPoint { position, .. }
                 | HoverPosition::Elsewhere { position } => Some(clock(position.x, true)),
             })
             .show(ui, |plot_ui| {
-                plot_ui.set_plot_bounds_x(x_range);
-                for s in series {
-                    for seg in segments(samples, from, bucket, offset, s.value) {
-                        plot_ui.line(Line::new(s.name, seg).color(s.color).width(1.5));
+                plot_ui.set_plot_bounds_x(c.x_range);
+                for (s, segs) in &lines {
+                    for seg in segs {
+                        plot_ui.line(Line::new(s.name, seg.clone()).color(s.color).width(1.5));
+                    }
+                    // The latest value stays visible at the end of the line.
+                    if let Some(&[x, y]) = segs.last().and_then(|seg| seg.last()) {
+                        plot_ui.text(
+                            Text::new(
+                                "",
+                                PlotPoint::new(x, y),
+                                RichText::new(value_text(y)).color(s.color).strong(),
+                            )
+                            .anchor(egui::Align2::RIGHT_BOTTOM),
+                        );
                     }
                 }
             });
     });
+    mv
 }
 
 #[cfg(test)]
@@ -415,6 +554,15 @@ mod tests {
             segments(&s, 15, 1, 3_600, |s| s.input_v),
             vec![vec![[3_620.0, 2.0]]]
         );
+    }
+
+    #[test]
+    fn restores_chart_order() {
+        assert_eq!(
+            parse_order("temperature, load,bogus,load"),
+            vec![Kind::Temperature, Kind::Load, Kind::Voltage, Kind::Battery]
+        );
+        assert_eq!(parse_order(""), Kind::ALL.to_vec());
     }
 
     #[test]
