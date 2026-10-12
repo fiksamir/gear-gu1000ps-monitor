@@ -30,6 +30,9 @@ const SUSPEND_EVENT_WINDOW_SECS: u32 = 120;
 /// How far back winlogon's hibernate request (event 187) may be when the
 /// suspend notification arrives; it is logged a fraction of a second before.
 const HYBRID_EVENT_WINDOW_SECS: u32 = 30;
+/// How long to wait for that event to reach the log: it is stored a moment
+/// after the suspend notification, and the PC sleeps soon after that.
+const HYBRID_EVENT_WAIT: Duration = Duration::from_millis(1500);
 
 define_windows_service!(ffi_service_main, service_main);
 
@@ -419,19 +422,29 @@ impl Monitor {
             }
         };
         let kind = if suspend && kind == ShutdownKind::Unknown {
-            match winutil::hybrid_shutdown_requested(HYBRID_EVENT_WINDOW_SECS) {
-                Ok(true) => {
-                    log(&format!(
-                        "{source}: winlogon запросив гібридне вимкнення (подія 187)"
-                    ));
-                    ShutdownKind::PowerOff
-                }
-                Ok(false) => kind,
-                Err(e) => {
-                    log(&format!(
-                        "{source}: не вдається прочитати журнал подій: {e}"
-                    ));
-                    kind
+            // The suspend notification arrives in the same instant winlogon's
+            // event 187 is raised, before the event log has stored it, so
+            // keep asking for a moment.
+            let started = Instant::now();
+            loop {
+                match winutil::hybrid_shutdown_requested(HYBRID_EVENT_WINDOW_SECS) {
+                    Ok(true) => {
+                        log(&format!(
+                            "{source}: winlogon запросив гібридне вимкнення (подія 187, знайдено за {} мс)",
+                            started.elapsed().as_millis()
+                        ));
+                        break ShutdownKind::PowerOff;
+                    }
+                    Ok(false) if started.elapsed() < HYBRID_EVENT_WAIT => {
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                    Ok(false) => break kind,
+                    Err(e) => {
+                        log(&format!(
+                            "{source}: не вдається прочитати журнал подій: {e}"
+                        ));
+                        break kind;
+                    }
                 }
             }
         } else {
