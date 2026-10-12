@@ -31,6 +31,7 @@ gear-ups — GEAR GU-1000PS (USB 0001:0000, MEC0003)
                                    вимкнути вихід ДБЖ через <хв> (0.5..10);
                                    --return: увімкнутись, коли є мережа
   gear-ups cancel                  скасувати заплановане вимкнення ДБЖ
+  gear-ups battery-test            тест батареї 10 с (ДБЖ переходить на батарею)
   gear-ups install [--disable-vendor]
                                    встановити або оновити службу GearUps і програму
                                    в треї (від адміністратора);
@@ -48,6 +49,7 @@ fn main() -> ExitCode {
         Some("events") => events(),
         Some("ups-off") => ups_off(args.get(1), flag("--return"), flag("--yes")),
         Some("cancel") => cancel(),
+        Some("battery-test") => battery_test(),
         Some("install") => install(flag("--disable-vendor"))
             .inspect_err(|e| winutil::log(&format!("встановлення: помилка: {e}"))),
         Some("uninstall") => uninstall(),
@@ -177,6 +179,22 @@ fn cancel() -> Result<(), String> {
         return Err("ДБЖ досі повідомляє про заплановане вимкнення".into());
     }
     println!("скасовано; заплановане вимкнення відсутнє");
+    Ok(())
+}
+
+fn battery_test() -> Result<(), String> {
+    let ups = open()?;
+    ups.command(protocol::IDX_TEST).map_err(|e| e.to_string())?;
+    for _ in 0..15 {
+        sleep(Duration::from_secs(1));
+        let s = read_status(&ups)?;
+        println!(
+            "тест: {}, вихід {:.0} В, батарея {:.1} В",
+            if s.test_in_progress() { "триває" } else { "ні" },
+            s.output_v,
+            s.battery_v
+        );
+    }
     Ok(())
 }
 

@@ -20,6 +20,9 @@ pub const IDX_CANCEL: u32 = 0x0a;
 pub const IDX_BEEPER_TOGGLE: u32 = 0x07;
 /// Battery charge, "BL075". Not in NUT; polled by the vendor's upsSmartView.
 pub const IDX_CHARGE: u32 = 0xf3;
+/// T: 10-second battery test. Not in NUT; command 0 of the vendor's
+/// libusb_mega.dll, the "Battery test 10s" button in upsSmartView.
+pub const IDX_TEST: u32 = 0x04;
 
 /// Descriptor index for "S<n>R0000" (stay off) or "S<n>R<m>" (come back when
 /// mains returns, after ~10 s). `delay_min` is clamped to 0.5..=10 minutes.
