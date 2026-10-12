@@ -309,7 +309,7 @@ pub fn show(
                         kind,
                         "Напруга, В",
                         |y| format!("{y:.1} В"),
-                        [0.0, 250.0],
+                        20.0,
                         &[
                             Series {
                                 name: "Вхід (мережа)",
@@ -334,7 +334,7 @@ pub fn show(
                                 (y / 100.0 * ups_power_w as f64).round()
                             )
                         },
-                        [0.0, 100.0],
+                        20.0,
                         &[Series {
                             name: "Навантаження",
                             color: Color32::from_rgb(171, 71, 188),
@@ -347,7 +347,7 @@ pub fn show(
                         kind,
                         "Батарея, В",
                         |y| format!("{y:.2} В"),
-                        [nominal * 0.85, nominal * 1.2],
+                        nominal * 0.05,
                         &[Series {
                             name: "Батарея",
                             color: Level::Warn.color(),
@@ -360,7 +360,7 @@ pub fn show(
                         kind,
                         "Температура, °C",
                         |y| format!("{y:.1} °C"),
-                        [20.0, 40.0],
+                        10.0,
                         &[Series {
                             name: "Температура",
                             color: Color32::from_rgb(0, 150, 136),
@@ -399,6 +399,26 @@ struct PlotCtx<'a> {
     can_down: bool,
 }
 
+/// Y range that fits every line of the period, at least `min_span` tall so
+/// small jitter is not blown up, with headroom for the value labels.
+fn fit_y(lines: &[(&Series, Vec<Segment>)], min_span: f64) -> RangeInclusive<f64> {
+    let ys = lines.iter().flat_map(|(_, segs)| segs.iter().flatten().map(|p| p[1]));
+    let (lo, hi) = ys.fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), y| {
+        (lo.min(y), hi.max(y))
+    });
+    if !lo.is_finite() {
+        return 0.0..=min_span.max(1.0);
+    }
+    let span = (hi - lo).max(min_span);
+    let mid = (lo + hi) / 2.0;
+    let non_negative = lo >= 0.0;
+    let (lo, hi) = (lo.min(mid - span / 2.0), hi.max(mid + span / 2.0));
+    let bottom = lo - span * 0.1;
+    // Values that are never negative should not get a negative axis.
+    let bottom = if non_negative { bottom.max(0.0) } else { bottom };
+    bottom..=hi + span * 0.3
+}
+
 /// Value of the point nearest to `x` (points sorted by x), if one lies
 /// within `tolerance`.
 fn value_at(points: &[[f64; 2]], x: f64, tolerance: f64) -> Option<f64> {
@@ -418,7 +438,7 @@ fn plot(
     kind: Kind,
     title: &str,
     value_text: impl Fn(f64) -> String + Clone + 'static,
-    include_y: [f64; 2],
+    min_span: f64,
     series: &[Series],
     c: PlotCtx<'_>,
 ) -> Option<Move> {
@@ -447,6 +467,7 @@ fn plot(
             .iter()
             .map(|s| (s, segments(c.samples, c.from, c.bucket, c.offset, s.value)))
             .collect();
+        let y_range = fit_y(&lines, min_span);
         let hover_text = value_text.clone();
         let hover_points: Vec<(&'static str, Segment)> = lines
             .iter()
@@ -464,8 +485,6 @@ fn plot(
             .allow_boxed_zoom(false)
             .allow_double_click_reset(false)
             .link_cursor("history", [true, false])
-            .include_y(include_y[0])
-            .include_y(include_y[1])
             .x_grid_spacer(uniform_grid_spacer(time_steps))
             .x_axis_formatter(move |mark: GridMark, _range: &RangeInclusive<f64>| {
                 clock(mark.value, with_date)
@@ -490,6 +509,7 @@ fn plot(
             })
             .show(ui, |plot_ui| {
                 plot_ui.set_plot_bounds_x(c.x_range);
+                plot_ui.set_plot_bounds_y(y_range);
                 for (s, segs) in &lines {
                     for seg in segs {
                         plot_ui.line(Line::new(s.name, seg.clone()).color(s.color).width(1.5));
@@ -575,6 +595,19 @@ mod tests {
             segments(&s, 15, 1, 3_600, |s| s.input_v),
             vec![vec![[3_620.0, 2.0]]]
         );
+    }
+
+    #[test]
+    fn fits_y_to_data() {
+        let s = Series {
+            name: "t",
+            color: Color32::BLACK,
+            value: |s| s.temp_c,
+        };
+        let r = fit_y(&[(&s, vec![vec![[0.0, 44.0], [1.0, 46.0]]])], 10.0);
+        assert!(*r.start() < 40.0 && *r.end() > 50.0, "{r:?}");
+        let r = fit_y(&[(&s, vec![vec![[0.0, 2.0]]])], 10.0);
+        assert_eq!(*r.start(), 0.0);
     }
 
     #[test]
