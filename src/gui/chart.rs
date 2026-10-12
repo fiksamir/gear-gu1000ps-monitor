@@ -399,6 +399,19 @@ struct PlotCtx<'a> {
     can_down: bool,
 }
 
+/// Value of the point nearest to `x` (points sorted by x), if one lies
+/// within `tolerance`.
+fn value_at(points: &[[f64; 2]], x: f64, tolerance: f64) -> Option<f64> {
+    let i = points.partition_point(|p| p[0] < x);
+    [i.checked_sub(1), Some(i)]
+        .into_iter()
+        .flatten()
+        .filter_map(|j| points.get(j))
+        .min_by(|a, b| (a[0] - x).abs().total_cmp(&(b[0] - x).abs()))
+        .filter(|p| (p[0] - x).abs() <= tolerance)
+        .map(|p| p[1])
+}
+
 /// Draws one plot card and returns the move the user asked for, if any.
 fn plot(
     ui: &mut egui::Ui,
@@ -435,6 +448,12 @@ fn plot(
             .map(|s| (s, segments(c.samples, c.from, c.bucket, c.offset, s.value)))
             .collect();
         let hover_text = value_text.clone();
+        let hover_points: Vec<(&'static str, Segment)> = lines
+            .iter()
+            .map(|(s, segs)| (s.name, segs.concat()))
+            .collect();
+        // Nearest sample counts only within a bucket or a polling gap.
+        let tolerance = (c.bucket * 2).max(GAP_SECS) as f64;
         let with_date = c.with_date;
         Plot::new(kind.key())
             .height(c.height)
@@ -454,18 +473,20 @@ fn plot(
             .y_axis_formatter(|mark: GridMark, _range: &RangeInclusive<f64>| {
                 format!("{:.0}", mark.value)
             })
-            .label_formatter(move |pos: &HoverPosition<'_>| match pos {
-                HoverPosition::NearDataPoint {
-                    plot_name,
-                    position,
-                    ..
-                } if !plot_name.is_empty() => Some(format!(
-                    "{plot_name}: {}\n{}",
-                    hover_text(position.y),
-                    clock(position.x, true)
-                )),
-                HoverPosition::NearDataPoint { position, .. }
-                | HoverPosition::Elsewhere { position } => Some(clock(position.x, true)),
+            .label_formatter(move |pos: &HoverPosition<'_>| {
+                // Every line's value at the cursor time, not only the line
+                // the cursor happens to be near.
+                let x = match pos {
+                    HoverPosition::NearDataPoint { position, .. }
+                    | HoverPosition::Elsewhere { position } => position.x,
+                };
+                let mut text = String::new();
+                for (name, points) in &hover_points {
+                    if let Some(y) = value_at(points, x, tolerance) {
+                        text += &format!("{name}: {}\n", hover_text(y));
+                    }
+                }
+                Some(text + &clock(x, true))
             })
             .show(ui, |plot_ui| {
                 plot_ui.set_plot_bounds_x(c.x_range);
@@ -554,6 +575,15 @@ mod tests {
             segments(&s, 15, 1, 3_600, |s| s.input_v),
             vec![vec![[3_620.0, 2.0]]]
         );
+    }
+
+    #[test]
+    fn finds_value_near_cursor() {
+        let pts = [[0.0, 1.0], [10.0, 2.0], [20.0, 3.0]];
+        assert_eq!(value_at(&pts, 12.0, 5.0), Some(2.0));
+        assert_eq!(value_at(&pts, 16.0, 5.0), Some(3.0));
+        assert_eq!(value_at(&pts, 40.0, 5.0), None);
+        assert_eq!(value_at(&[], 1.0, 5.0), None);
     }
 
     #[test]
