@@ -14,16 +14,19 @@ use std::ptr::null;
 use std::sync::Arc;
 
 use eframe::egui;
-use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS, POINT, RECT};
+use windows_sys::Win32::Foundation::{
+    GetLastError, ERROR_ALREADY_EXISTS, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+};
 use windows_sys::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
     MONITOR_DEFAULTTOPRIMARY,
 };
 use windows_sys::Win32::System::Threading::CreateMutexW;
+use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     FindWindowW, GetWindowPlacement, IsIconic, IsWindowVisible, SetForegroundWindow,
     SetWindowPlacement, ShowWindow, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE,
-    WINDOWPLACEMENT,
+    WINDOWPLACEMENT, WM_ENDSESSION,
 };
 
 use gear_ups::winutil::wide;
@@ -125,6 +128,30 @@ pub fn window_on_screen() -> bool {
     !hwnd.is_null() && unsafe { IsWindowVisible(hwnd) != 0 && IsIconic(hwnd) == 0 }
 }
 
+/// Makes the process exit as soon as Windows ends the session. Left to
+/// winit, it keeps running after WM_ENDSESSION and Windows waits 5 s for it
+/// before shutting down. Must be called on the thread that owns the window.
+fn exit_on_session_end() {
+    unsafe extern "system" fn proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _id: usize,
+        _data: usize,
+    ) -> LRESULT {
+        if msg == WM_ENDSESSION && wparam != 0 {
+            std::process::exit(0);
+        }
+        unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
+    }
+    let title = wide(TITLE);
+    let hwnd = unsafe { FindWindowW(null(), title.as_ptr()) };
+    if !hwnd.is_null() {
+        unsafe { SetWindowSubclass(hwnd, Some(proc), 1, 0) };
+    }
+}
+
 fn main() -> eframe::Result<()> {
     if !single_instance() {
         return Ok(());
@@ -148,6 +175,7 @@ fn main() -> eframe::Result<()> {
         TITLE,
         options,
         Box::new(|cc| {
+            exit_on_session_end();
             theme::apply(&cc.egui_ctx);
             let view = backend::spawn_poller(cc.egui_ctx.clone());
             Ok(Box::new(app::GuiApp::new(cc, view)))
