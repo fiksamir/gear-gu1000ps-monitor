@@ -28,6 +28,10 @@ pub struct Snapshot {
     pub pc_shutdown_requested: bool,
     pub ups_off_sent: bool,
     pub poll_interval_secs: u64,
+    /// How long the UPS has been repeating the same status line, once that
+    /// counts as a hung USB bridge.
+    #[serde(default)]
+    pub frozen_secs: Option<u64>,
 }
 
 pub fn path() -> PathBuf {

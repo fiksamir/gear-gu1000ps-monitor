@@ -161,7 +161,15 @@ fn summarize(v: &View, cfg: &Config) -> Summary {
         return s;
     };
     let elapsed = snapshot::unix_now().saturating_sub(snap.updated_unix);
-    if st.shutdown_active() {
+    if let Some(frozen) = snap.frozen_secs {
+        s.level = Level::Alarm;
+        s.title = "Дані від ДБЖ не оновлюються".into();
+        s.detail = format!(
+            "ДБЖ уже {} хв повторює той самий стан, тож зникнення мережі не буде помічено. \
+             Від'єднайте USB-кабель ДБЖ на 10 секунд і під'єднайте знову.",
+            (frozen + elapsed) / 60
+        );
+    } else if st.shutdown_active() {
         s.level = Level::Alarm;
         s.title = "Заплановано вимкнення ДБЖ".into();
         s.detail = "Вихід ДБЖ скоро вимкнеться. Якщо ви цього не планували, скасуйте.".into();
@@ -531,16 +539,20 @@ impl GuiApp {
             });
     }
 
-    /// The beeper lives in the UPS, not in config.toml, and the UPS does not
-    /// report its state reliably (status bit 7 ignores the toggle), so this is
-    /// a plain toggle button and the UPS display shows the result.
+    /// The beeper lives in the UPS, not in config.toml; the UPS only has a
+    /// toggle command and reports the resulting state in status bit 7.
     fn beeper_card(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, status: Option<&Status>) {
         let result = self.beeper_outcome.lock().ok().and_then(|o| o.clone());
         theme::card(ui, "ЗВУК ДБЖ", |ui| {
-            if status.is_none() {
+            let Some(st) = status else {
                 ui.label(RichText::new("Немає зв'язку з ДБЖ.").color(theme::WEAK));
                 return;
-            }
+            };
+            ui.label(RichText::new(if st.beeper_on() {
+                "Звук увімкнено"
+            } else {
+                "Звук вимкнено"
+            }));
             if ui.button("Перемкнути звук ДБЖ").clicked() {
                 if let Ok(mut o) = self.beeper_outcome.lock() {
                     *o = None;
@@ -550,7 +562,7 @@ impl GuiApp {
             ui.label(
                 RichText::new(
                     "Вмикає або вимикає звукові сигнали ДБЖ (зникнення мережі, низький заряд, \
-                     перевантаження). Поточний стан видно на екрані ДБЖ: ДБЖ не повідомляє його програмі.",
+                     перевантаження). Новий стан з'явиться тут за кілька секунд.",
                 )
                 .color(theme::WEAK),
             );

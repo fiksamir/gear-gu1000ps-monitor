@@ -114,8 +114,6 @@ impl Status {
     pub fn shutdown_active(&self) -> bool {
         self.bits[6]
     }
-    /// Unreliable on this UPS: it ignores the beeper toggle.
-    /// Unreliable on this UPS: it ignores the beeper toggle.
     pub fn beeper_on(&self) -> bool {
         self.bits[7]
     }

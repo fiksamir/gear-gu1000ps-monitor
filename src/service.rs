@@ -135,7 +135,16 @@ struct Monitor {
     on_battery_since: Option<Instant>,
     pc_shutdown_requested: bool,
     ups_off_sent: bool,
+    /// Last raw Q1 reply and when it last changed: the USB bridge can hang
+    /// and keep answering with the same stale line.
+    last_raw: Option<String>,
+    raw_changed_at: Instant,
+    frozen: bool,
 }
+
+/// Mains voltage and load jitter every few seconds, so a Q1 line that stays
+/// byte-for-byte identical this long means the USB bridge has hung.
+const FROZEN_AFTER: Duration = Duration::from_secs(10 * 60);
 
 impl Monitor {
     fn new(cfg: Config) -> Monitor {
@@ -148,6 +157,9 @@ impl Monitor {
             on_battery_since: None,
             pc_shutdown_requested: false,
             ups_off_sent: false,
+            last_raw: None,
+            raw_changed_at: Instant::now(),
+            frozen: false,
         }
     }
 
@@ -192,15 +204,36 @@ impl Monitor {
         let reply = self.ups.as_ref()?.command(protocol::IDX_STATUS);
         match reply
             .map_err(|e| e.to_string())
-            .and_then(|s| Status::parse(&s))
+            .and_then(|r| Status::parse(&r).map(|s| (r, s)))
         {
-            Ok(s) => Some(s),
+            Ok((raw, s)) => {
+                self.track_freshness(raw);
+                Some(s)
+            }
             Err(e) => {
                 log(&format!("ДБЖ не відповів на запит стану: {e}"));
                 self.last_error = Some(e);
                 self.ups = None;
                 None
             }
+        }
+    }
+
+    fn track_freshness(&mut self, raw: String) {
+        if self.last_raw.as_ref() != Some(&raw) {
+            if self.frozen {
+                log("дані від ДБЖ знову оновлюються");
+                self.frozen = false;
+            }
+            self.last_raw = Some(raw);
+            self.raw_changed_at = Instant::now();
+        } else if !self.frozen && self.raw_changed_at.elapsed() >= FROZEN_AFTER {
+            log(&format!(
+                "дані від ДБЖ не оновлюються вже {} хв (USB-контролер ДБЖ завис): \
+                 від'єднайте USB-кабель ДБЖ на 10 с",
+                FROZEN_AFTER.as_secs() / 60
+            ));
+            self.frozen = true;
         }
     }
 
@@ -328,6 +361,9 @@ impl Monitor {
             pc_shutdown_requested: self.pc_shutdown_requested,
             ups_off_sent: self.ups_off_sent,
             poll_interval_secs: self.cfg.poll_interval_secs,
+            frozen_secs: self
+                .frozen
+                .then(|| self.raw_changed_at.elapsed().as_secs()),
         });
     }
 
