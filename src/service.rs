@@ -464,7 +464,17 @@ impl Monitor {
             return;
         }
 
+        // On mains the UPS would only go to "PWR DN": it passes mains through
+        // without battery backup and no USB command brings it back to line
+        // mode, so the PC would start unprotected. The UPS's own NLS setting
+        // turns it off if power fails while the PC is off.
         let on_battery = self.query().map(|s| s.on_battery()).unwrap_or(false);
+        if !on_battery {
+            log(&format!(
+                "{source}: живлення від мережі, ДБЖ лишається увімкненим"
+            ));
+            return;
+        }
         let restore = on_battery && self.cfg.ups_return_when_on_battery;
         let index = protocol::shutdown_index(self.cfg.ups_off_delay_min, restore);
         let what = format!(

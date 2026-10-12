@@ -692,7 +692,7 @@ impl GuiApp {
             |ui| {
                 ui.checkbox(
                     &mut f.ups_off_on_pc_shutdown,
-                    "Вимикати ДБЖ, коли Windows вимикається (не при перезавантаженні чи сні)",
+                    "Вимикати ДБЖ, коли Windows вимикається від батареї (не при перезавантаженні чи сні)",
                 );
                 ui.add_enabled_ui(f.ups_off_on_pc_shutdown, |ui| {
                     ui.horizontal(|ui| {
