@@ -1,4 +1,4 @@
-//! History tab: four stacked plots (voltages, load, battery, temperature)
+//! History tab: stacked plots (voltages, load, battery, charge, temperature)
 //! sharing the time axis, over a chosen period up to now, in a user-set order.
 
 use std::ops::RangeInclusive;
@@ -190,17 +190,25 @@ pub enum Kind {
     Voltage,
     Load,
     Battery,
+    Charge,
     Temperature,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 4] = [Kind::Voltage, Kind::Load, Kind::Battery, Kind::Temperature];
+    pub const ALL: [Kind; 5] = [
+        Kind::Voltage,
+        Kind::Load,
+        Kind::Battery,
+        Kind::Charge,
+        Kind::Temperature,
+    ];
 
     fn key(self) -> &'static str {
         match self {
             Kind::Voltage => "voltage",
             Kind::Load => "load",
             Kind::Battery => "battery",
+            Kind::Charge => "charge",
             Kind::Temperature => "temperature",
         }
     }
@@ -352,6 +360,19 @@ pub fn show(
                             name: "Батарея",
                             color: Level::Warn.color(),
                             value: |s| s.battery_v,
+                        }],
+                        ctx,
+                    ),
+                    Kind::Charge => plot(
+                        ui,
+                        kind,
+                        "Заряд батареї, %",
+                        |y| format!("{y:.0} %"),
+                        20.0,
+                        &[Series {
+                            name: "Заряд (від ДБЖ)",
+                            color: Color32::from_rgb(67, 160, 71),
+                            value: |s| s.charge_pct,
                         }],
                         ctx,
                     ),
@@ -544,6 +565,7 @@ mod tests {
             battery_v: v,
             on_battery: false,
             temp_c: v,
+            charge_pct: v,
         }
     }
 
@@ -623,7 +645,13 @@ mod tests {
     fn restores_chart_order() {
         assert_eq!(
             parse_order("temperature, load,bogus,load"),
-            vec![Kind::Temperature, Kind::Load, Kind::Voltage, Kind::Battery]
+            vec![
+                Kind::Temperature,
+                Kind::Load,
+                Kind::Voltage,
+                Kind::Battery,
+                Kind::Charge
+            ]
         );
         assert_eq!(parse_order(""), Kind::ALL.to_vec());
     }
