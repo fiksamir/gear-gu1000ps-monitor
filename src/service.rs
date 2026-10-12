@@ -140,6 +140,7 @@ struct Monitor {
     last_raw: Option<String>,
     raw_changed_at: Instant,
     frozen: bool,
+    hot: bool,
 }
 
 /// Mains voltage and load jitter every few seconds, so a Q1 line that stays
@@ -160,6 +161,7 @@ impl Monitor {
             last_raw: None,
             raw_changed_at: Instant::now(),
             frozen: false,
+            hot: false,
         }
     }
 
@@ -310,6 +312,15 @@ impl Monitor {
                     });
                 }
             }
+        }
+
+        let limit = self.cfg.temp_alarm_c as f32;
+        if limit > 0.0 && !self.hot && s.temp_c >= limit {
+            log(&format!("ДБЖ гарячий: {:.0} °C (поріг {limit:.0} °C)", s.temp_c));
+            self.hot = true;
+        } else if self.hot && (limit == 0.0 || s.temp_c <= limit - 3.0) {
+            log(&format!("температура ДБЖ знизилась до {:.0} °C", s.temp_c));
+            self.hot = false;
         }
 
         if s.on_battery() {

@@ -206,6 +206,16 @@ fn summarize(v: &View, cfg: &Config) -> Summary {
         s.title = "Живлення від мережі".into();
         s.detail = "ПК захищено.".into();
     }
+    if cfg.temp_alarm_c > 0 && st.temp_c >= cfg.temp_alarm_c as f32 {
+        let hot = format!("ДБЖ гарячий: {:.0} °C (поріг {} °C).", st.temp_c, cfg.temp_alarm_c);
+        if s.level == Level::Ok {
+            s.level = Level::Warn;
+            s.title = "ДБЖ перегрівається".into();
+            s.detail = format!("{hot} Перевірте кулер і вентиляцію.");
+        } else {
+            s.detail = format!("{} {hot}", s.detail);
+        }
+    }
     s.status = Some(st);
     s
 }
@@ -678,6 +688,16 @@ impl GuiApp {
             ui.label(
                 RichText::new("Ємність одного блоку з наклейки на батареї. У GU-1000PS зазвичай 2 × 12 В 7 А·год → 7.")
                     .color(theme::WEAK),
+            );
+            ui.horizontal(|ui| {
+                ui.label("Попереджати, коли температура ДБЖ досягне");
+                let mut temp = f.temp_alarm_c as f64;
+                if theme::stepper(ui, "temp_alarm", &mut temp, 0.0, 90.0, 1.0, 0, "°C") {
+                    f.temp_alarm_c = temp as u32;
+                }
+            });
+            ui.label(
+                RichText::new("Показання датчика ДБЖ. 0 — не попереджати.").color(theme::WEAK),
             );
         });
 

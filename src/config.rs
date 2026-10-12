@@ -33,6 +33,8 @@ pub struct Config {
     pub ups_power_w: u32,
     /// Capacity of one battery block, Ah, for the runtime estimate.
     pub battery_ah: f64,
+    /// Warn when the UPS temperature sensor reaches this, °C (0 = never).
+    pub temp_alarm_c: u32,
 }
 
 impl Default for Config {
@@ -47,6 +49,7 @@ impl Default for Config {
             skip_when_update_pending: true,
             ups_power_w: 600,
             battery_ah: 7.0,
+            temp_alarm_c: 55,
         }
     }
 }
@@ -103,6 +106,7 @@ impl Config {
         self.ups_off_delay_min = self.ups_off_delay_min.clamp(0.5, 10.0);
         self.ups_power_w = self.ups_power_w.clamp(100, 10_000);
         self.battery_ah = self.battery_ah.clamp(1.0, 500.0);
+        self.temp_alarm_c = self.temp_alarm_c.min(90);
         self
     }
 }
