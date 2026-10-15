@@ -17,6 +17,8 @@ use crate::tray::Level;
 
 /// At most this many buckets per line; each contributes its min and max.
 const MAX_BUCKETS: u64 = 800;
+/// Points on each side averaged into every point of a line.
+const SMOOTH_RADIUS: usize = 3;
 const DAY: i64 = 86_400;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -61,8 +63,8 @@ impl Period {
 type Segment = Vec<[f64; 2]>;
 
 /// Splits samples from `from` on into unbroken segments (a gap longer than
-/// `GAP_SECS` starts a new one) and thins each to the min and max per
-/// `bucket` seconds. Non-finite values break the line too.
+/// `GAP_SECS` starts a new one) and thins each to the mean per `bucket`
+/// seconds. Non-finite values break the line too.
 /// X is local time in seconds (`t + offset`).
 fn segments(
     samples: &[Sample],
@@ -71,22 +73,17 @@ fn segments(
     offset: i64,
     value: impl Fn(&Sample) -> f32,
 ) -> Vec<Segment> {
-    fn flush(out: &mut [Segment], cur: Option<(u64, [f64; 2], [f64; 2])>) {
-        let (Some(seg), Some((_, lo, hi))) = (out.last_mut(), cur) else {
-            return;
-        };
-        if lo == hi {
-            seg.push(lo);
-        } else if lo[0] <= hi[0] {
-            seg.extend([lo, hi]);
-        } else {
-            seg.extend([hi, lo]);
+    /// Bucket id, sum of x, sum of y, sample count.
+    type Acc = (u64, f64, f64, f64);
+    fn flush(out: &mut [Segment], cur: Option<Acc>) {
+        if let (Some(seg), Some((_, x, y, n))) = (out.last_mut(), cur) {
+            seg.push([x / n, y / n]);
         }
     }
 
     let bucket = bucket.max(1);
     let mut out: Vec<Segment> = Vec::new();
-    let mut cur: Option<(u64, [f64; 2], [f64; 2])> = None;
+    let mut cur: Option<Acc> = None;
     let mut prev_t: Option<u64> = None;
     let start = samples.partition_point(|s| s.t < from);
     for s in &samples[start..] {
@@ -104,22 +101,36 @@ fn segments(
         let pt = [(s.t as i64 + offset) as f64, v as f64];
         let id = s.t / bucket;
         match &mut cur {
-            Some((b, lo, hi)) if *b == id => {
-                if pt[1] < lo[1] {
-                    *lo = pt;
-                }
-                if pt[1] > hi[1] {
-                    *hi = pt;
-                }
+            Some((b, x, y, n)) if *b == id => {
+                *x += pt[0];
+                *y += pt[1];
+                *n += 1.0;
             }
             _ => {
                 flush(&mut out, cur.take());
-                cur = Some((id, pt, pt));
+                cur = Some((id, pt[0], pt[1], 1.0));
             }
         }
     }
     flush(&mut out, cur);
     out
+}
+
+/// Centered moving average over `radius` points on each side. Neighbours
+/// further than `step` from the point are left out, so real jumps (a power
+/// cut, the fan starting) stay sharp while sensor jitter and the rounding
+/// staircase smooth out.
+fn smooth(seg: &[[f64; 2]], radius: usize, step: f64) -> Segment {
+    (0..seg.len())
+        .map(|i| {
+            let [x, y] = seg[i];
+            let near = seg[i.saturating_sub(radius)..(i + radius + 1).min(seg.len())]
+                .iter()
+                .filter(|p| (p[1] - y).abs() <= step);
+            let (sum, n) = near.fold((0.0, 0.0), |(s, n), p| (s + p[1], n + 1.0));
+            [x, sum / n]
+        })
+        .collect()
 }
 
 /// Local time minus UTC, in seconds, rounded to a quarter hour.
@@ -518,7 +529,14 @@ fn plot(
         });
         let lines: Vec<(&Series, Vec<Segment>)> = series
             .iter()
-            .map(|s| (s, segments(c.samples, c.from, c.bucket, c.offset, s.value)))
+            .map(|s| {
+                let segs = segments(c.samples, c.from, c.bucket, c.offset, s.value);
+                let segs = segs
+                    .iter()
+                    .map(|g| smooth(g, SMOOTH_RADIUS, min_span / 2.0))
+                    .collect();
+                (s, segs)
+            })
             .collect();
         let y_range = fit_y(&lines, min_span);
         let hover_text = value_text.clone();
@@ -621,7 +639,7 @@ mod tests {
     }
 
     #[test]
-    fn keeps_min_and_max_per_bucket() {
+    fn averages_per_bucket() {
         let s = [
             sample(0, 5.0),
             sample(10, 1.0),
@@ -630,7 +648,23 @@ mod tests {
             sample(60, 7.0),
         ];
         let segs = segments(&s, 0, 60, 0, |s| s.input_v);
-        assert_eq!(segs, vec![vec![[10.0, 1.0], [20.0, 9.0], [60.0, 7.0]]]);
+        assert_eq!(segs, vec![vec![[15.0, 4.75], [60.0, 7.0]]]);
+    }
+
+    #[test]
+    fn smooths_jitter_but_keeps_jumps() {
+        let seg = [
+            [0.0, 45.0],
+            [1.0, 46.0],
+            [2.0, 45.0],
+            [3.0, 30.0],
+            [4.0, 30.0],
+        ];
+        let out = smooth(&seg, 1, 5.0);
+        assert_eq!(out[1], [1.0, 136.0 / 3.0]);
+        // The jump from 45 to 30 is not averaged away.
+        assert_eq!(out[2], [2.0, 45.5]);
+        assert_eq!(out[3], [3.0, 30.0]);
     }
 
     #[test]
