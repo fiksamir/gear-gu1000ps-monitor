@@ -49,6 +49,7 @@ fn service_main(_args: Vec<OsString>) {
 fn run_service() -> windows_service::Result<()> {
     let cfg = Config::load();
     log(&format!("служба запускається, налаштування: {cfg:?}"));
+    history::backfill_archive(snapshot::unix_now());
     let mut poll_interval = Duration::from_secs(cfg.poll_interval_secs);
     let mut cfg_modified = config::modified();
     let monitor = Arc::new(Mutex::new(Monitor::new(cfg)));
@@ -141,6 +142,7 @@ struct Monitor {
     /// Last raw Q1 reply and when it last changed: the USB bridge can hang
     /// and keep answering with the same stale line.
     last_raw: Option<String>,
+    archiver: history::Archiver,
     raw_changed_at: Instant,
     frozen: bool,
     hot: bool,
@@ -162,6 +164,7 @@ impl Monitor {
             pc_shutdown_requested: false,
             ups_off_sent: false,
             last_raw: None,
+            archiver: history::Archiver::default(),
             raw_changed_at: Instant::now(),
             frozen: false,
             hot: false,
@@ -274,7 +277,9 @@ impl Monitor {
         if let Some(s) = self.query() {
             // Only fresh readings go to the history; publish() also runs
             // from on_power_down with the last known status.
-            history::append(history::Sample::from_status(snapshot::unix_now(), &s));
+            let sample = history::Sample::from_status(snapshot::unix_now(), &s);
+            history::append(sample);
+            self.archiver.push(sample);
             self.handle(s);
         }
         self.publish();

@@ -11,11 +11,11 @@ use egui_plot::{
 use windows_sys::Win32::Foundation::SYSTEMTIME;
 use windows_sys::Win32::System::SystemInformation::GetLocalTime;
 
-use gear_ups::history::{Sample, GAP_SECS};
+use gear_ups::history::{Reader, Sample, ARCHIVE_SECS, GAP_SECS};
 
 use crate::tray::Level;
 
-/// At most this many buckets per line; each contributes its min and max.
+/// At most this many buckets per line; each contributes its mean.
 const MAX_BUCKETS: u64 = 800;
 /// Points on each side averaged into every point of a line.
 const SMOOTH_RADIUS: usize = 3;
@@ -28,24 +28,36 @@ pub enum Period {
     Hour6,
     Day1,
     Week,
+    Month,
+    HalfYear,
+    All,
 }
 
 impl Period {
-    const ALL: [Period; 5] = [
+    const ALL: [Period; 8] = [
         Period::Min10,
         Period::Hour1,
         Period::Hour6,
         Period::Day1,
         Period::Week,
+        Period::Month,
+        Period::HalfYear,
+        Period::All,
     ];
 
-    fn secs(self) -> u64 {
+    /// Length in seconds; `All` reaches back to the oldest sample.
+    fn secs(self, earliest: Option<u64>, now: u64) -> u64 {
         match self {
             Period::Min10 => 600,
             Period::Hour1 => 3_600,
             Period::Hour6 => 6 * 3_600,
             Period::Day1 => DAY as u64,
             Period::Week => 7 * DAY as u64,
+            Period::Month => 30 * DAY as u64,
+            Period::HalfYear => 182 * DAY as u64,
+            Period::All => earliest
+                .map_or(0, |e| now.saturating_sub(e))
+                .max(DAY as u64),
         }
     }
 
@@ -56,6 +68,9 @@ impl Period {
             Period::Hour6 => "6 год",
             Period::Day1 => "доба",
             Period::Week => "тиждень",
+            Period::Month => "місяць",
+            Period::HalfYear => "пів року",
+            Period::All => "увесь час",
         }
     }
 }
@@ -71,6 +86,7 @@ fn segments(
     from: u64,
     bucket: u64,
     offset: i64,
+    gap: u64,
     value: impl Fn(&Sample) -> f32,
 ) -> Vec<Segment> {
     /// Bucket id, sum of x, sum of y, sample count.
@@ -93,7 +109,7 @@ fn segments(
             prev_t = None;
             continue;
         }
-        if prev_t.is_none_or(|p| s.t.saturating_sub(p) > GAP_SECS) {
+        if prev_t.is_none_or(|p| s.t.saturating_sub(p) > gap) {
             flush(&mut out, cur.take());
             out.push(Vec::new());
         }
@@ -147,16 +163,53 @@ pub(crate) fn utc_offset_secs(now: u64) -> i64 {
     (diff as f64 / 900.0).round() as i64 * 900
 }
 
-/// "14:05", or "10.10 14:05" when `with_date`. `x` is local seconds since 1970.
-fn clock(x: f64, with_date: bool) -> String {
+/// What the time axis shows; short enough that the labels fit side by
+/// side in a half-width plot (egui_plot hides labels that overlap).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Labels {
+    /// "14:05".
+    Time,
+    /// "14:00", with "13.10" at midnight.
+    TimeOrDate,
+    /// "13.10".
+    Date,
+    /// "13.10.26".
+    DateYear,
+}
+
+impl Labels {
+    fn for_span(span: u64) -> Labels {
+        match span / DAY as u64 {
+            _ if span <= DAY as u64 / 2 => Labels::Time,
+            0..=2 => Labels::TimeOrDate,
+            3..=300 => Labels::Date,
+            _ => Labels::DateYear,
+        }
+    }
+}
+
+/// Axis label for `x`, local seconds since 1970.
+fn axis_label(x: f64, labels: Labels) -> String {
     let secs = x.round() as i64;
     let sod = secs.rem_euclid(DAY);
-    let hm = format!("{:02}:{:02}", sod / 3_600, sod % 3_600 / 60);
-    if !with_date {
-        return hm;
+    let (year, month, day) = civil_from_days(secs.div_euclid(DAY));
+    match labels {
+        Labels::Time => hm(sod),
+        Labels::TimeOrDate if sod != 0 => hm(sod),
+        Labels::TimeOrDate | Labels::Date => format!("{day:02}.{month:02}"),
+        Labels::DateYear => format!("{day:02}.{month:02}.{:02}", year % 100),
     }
+}
+
+/// "10.10 14:05" for the tooltip.
+fn date_time(x: f64) -> String {
+    let secs = x.round() as i64;
     let (_, month, day) = civil_from_days(secs.div_euclid(DAY));
-    format!("{day:02}.{month:02} {hm}")
+    format!("{day:02}.{month:02} {}", hm(secs.rem_euclid(DAY)))
+}
+
+fn hm(sod: i64) -> String {
+    format!("{:02}:{:02}", sod / 3_600, sod % 3_600 / 60)
 }
 
 /// Days since 1970-01-01 to (year, month, day); Howard Hinnant's algorithm.
@@ -174,13 +227,29 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 
 /// Grid steps in seconds that fall on round clock times.
 fn time_steps(input: GridInput) -> [f64; 3] {
-    const STEPS: [f64; 10] = [
-        60.0, 300.0, 600.0, 1_800.0, 3_600.0, 7_200.0, 10_800.0, 21_600.0, 43_200.0, 86_400.0,
+    const STEPS: [f64; 16] = [
+        60.0,
+        300.0,
+        600.0,
+        1_800.0,
+        3_600.0,
+        7_200.0,
+        10_800.0,
+        21_600.0,
+        43_200.0,
+        86_400.0,
+        172_800.0,
+        604_800.0,
+        1_209_600.0,
+        2_592_000.0,
+        5_184_000.0,
+        7_776_000.0,
     ];
     let width = input.bounds.1 - input.bounds.0;
     let i = STEPS
         .iter()
-        .position(|&s| width / s <= 8.0)
+        // egui_plot hides labels closer than ~60 px; a half-width plot fits six.
+        .position(|&s| width / s <= 6.0)
         .unwrap_or(STEPS.len() - 1);
     [
         STEPS[i.saturating_sub(2)],
@@ -269,7 +338,7 @@ fn save_order(order: &[Kind]) {
 
 pub fn show(
     ui: &mut egui::Ui,
-    samples: &[Sample],
+    history: &Reader,
     period: &mut Period,
     order: &mut [Kind],
     nominal_battery_v: f32,
@@ -280,9 +349,14 @@ pub fn show(
     crate::theme::segmented(ui, period, &items);
     ui.add_space(crate::theme::GAP);
 
-    let span = period.secs();
+    let (samples, archive) = (&history.samples[..], &history.archive[..]);
+    // Older than the detailed history: the archive's 5-minute means.
+    let detailed_from = samples.first().map_or(u64::MAX, |s| s.t);
+    let older = &archive[..archive.partition_point(|s| s.t < detailed_from)];
+    let earliest = older.first().or(samples.first()).map(|s| s.t);
+    let span = period.secs(earliest, now);
     let from = now.saturating_sub(span);
-    if samples.last().is_none_or(|s| s.t < from) {
+    if samples.last().or(older.last()).is_none_or(|s| s.t < from) {
         crate::theme::card(ui, "", |ui| {
             ui.label("За цей період даних немає.");
             ui.label(
@@ -296,7 +370,7 @@ pub fn show(
     let offset = utc_offset_secs(now);
     let bucket = span / MAX_BUCKETS;
     let x_range = (from as i64 + offset) as f64..=(now as i64 + offset) as f64;
-    let with_date = span > DAY as u64 / 2;
+    let labels = Labels::for_span(span);
     let blue = Color32::from_rgb(66, 133, 244);
     let nominal = nominal_battery_v as f64;
 
@@ -405,12 +479,13 @@ pub fn show(
             let mut cell = |ui: &mut egui::Ui, i: usize| {
                 let ctx = PlotCtx {
                     samples,
+                    older,
                     height,
                     from,
                     bucket,
                     offset,
                     x_range: x_range.clone(),
-                    with_date,
+                    labels,
                     can_up: i > 0,
                     can_down: i < last,
                 };
@@ -447,12 +522,14 @@ enum Move {
 
 struct PlotCtx<'a> {
     samples: &'a [Sample],
+    /// Archive means from before `samples` begin.
+    older: &'a [Sample],
     height: f32,
     from: u64,
     bucket: u64,
     offset: i64,
     x_range: RangeInclusive<f64>,
-    with_date: bool,
+    labels: Labels,
     can_up: bool,
     can_down: bool,
 }
@@ -530,7 +607,17 @@ fn plot(
         let lines: Vec<(&Series, Vec<Segment>)> = series
             .iter()
             .map(|s| {
-                let segs = segments(c.samples, c.from, c.bucket, c.offset, s.value);
+                let mut segs = segments(
+                    c.older,
+                    c.from,
+                    c.bucket,
+                    c.offset,
+                    2 * ARCHIVE_SECS + GAP_SECS,
+                    s.value,
+                );
+                segs.extend(segments(
+                    c.samples, c.from, c.bucket, c.offset, GAP_SECS, s.value,
+                ));
                 let segs = segs
                     .iter()
                     .map(|g| smooth(g, SMOOTH_RADIUS, min_span / 2.0))
@@ -545,8 +632,13 @@ fn plot(
             .map(|(s, segs)| (s.name, segs.concat()))
             .collect();
         // Nearest sample counts only within a bucket or a polling gap.
-        let tolerance = (c.bucket * 2).max(GAP_SECS) as f64;
-        let with_date = c.with_date;
+        let step = if c.older.is_empty() {
+            GAP_SECS
+        } else {
+            ARCHIVE_SECS
+        };
+        let tolerance = (c.bucket * 2).max(step) as f64;
+        let labels = c.labels;
         Plot::new(kind.key())
             .height(c.height)
             .legend(Legend::default().position(Corner::LeftTop))
@@ -558,7 +650,7 @@ fn plot(
             .link_cursor("history", [true, false])
             .x_grid_spacer(uniform_grid_spacer(time_steps))
             .x_axis_formatter(move |mark: GridMark, _range: &RangeInclusive<f64>| {
-                clock(mark.value, with_date)
+                axis_label(mark.value, labels)
             })
             .y_axis_formatter(|mark: GridMark, _range: &RangeInclusive<f64>| {
                 format!("{:.0}", mark.value)
@@ -576,7 +668,7 @@ fn plot(
                         text += &format!("{name}: {}\n", hover_text(y));
                     }
                 }
-                Some(text + &clock(x, true))
+                Some(text + &date_time(x))
             })
             .show(ui, |plot_ui| {
                 plot_ui.set_plot_bounds_x(c.x_range);
@@ -627,7 +719,7 @@ mod tests {
             sample(105 + GAP_SECS + 1, 3.0),
             sample(500, 4.0),
         ];
-        let segs = segments(&s, 0, 1, 0, |s| s.input_v);
+        let segs = segments(&s, 0, 1, 0, GAP_SECS, |s| s.input_v);
         assert_eq!(
             segs,
             vec![
@@ -647,7 +739,7 @@ mod tests {
             sample(30, 4.0),
             sample(60, 7.0),
         ];
-        let segs = segments(&s, 0, 60, 0, |s| s.input_v);
+        let segs = segments(&s, 0, 60, 0, GAP_SECS, |s| s.input_v);
         assert_eq!(segs, vec![vec![[15.0, 4.75], [60.0, 7.0]]]);
     }
 
@@ -671,7 +763,7 @@ mod tests {
     fn breaks_on_missing_values() {
         let s = [sample(0, 1.0), sample(5, f32::NAN), sample(10, 3.0)];
         assert_eq!(
-            segments(&s, 0, 1, 0, |s| s.temp_c),
+            segments(&s, 0, 1, 0, GAP_SECS, |s| s.temp_c),
             vec![vec![[0.0, 1.0]], vec![[10.0, 3.0]]]
         );
     }
@@ -680,7 +772,7 @@ mod tests {
     fn starts_at_from_and_applies_offset() {
         let s = [sample(10, 1.0), sample(20, 2.0)];
         assert_eq!(
-            segments(&s, 15, 1, 3_600, |s| s.input_v),
+            segments(&s, 15, 1, 3_600, GAP_SECS, |s| s.input_v),
             vec![vec![[3_620.0, 2.0]]]
         );
     }
@@ -723,11 +815,19 @@ mod tests {
     }
 
     #[test]
-    fn formats_clock() {
+    fn formats_time_labels() {
         // 2026-10-10 14:05:00 UTC
         let x = 1_791_641_100.0;
-        assert_eq!(clock(x, false), "14:05");
-        assert_eq!(clock(x, true), "10.10 14:05");
+        let midnight = 1_791_590_400.0;
+        assert_eq!(axis_label(x, Labels::Time), "14:05");
+        assert_eq!(axis_label(x, Labels::TimeOrDate), "14:05");
+        assert_eq!(axis_label(midnight, Labels::TimeOrDate), "10.10");
+        assert_eq!(axis_label(x, Labels::Date), "10.10");
+        assert_eq!(axis_label(x, Labels::DateYear), "10.10.26");
+        assert_eq!(date_time(x), "10.10 14:05");
+        assert_eq!(Labels::for_span(3_600), Labels::Time);
+        assert_eq!(Labels::for_span(86_400), Labels::TimeOrDate);
+        assert_eq!(Labels::for_span(7 * 86_400), Labels::Date);
         assert_eq!(civil_from_days(0), (1970, 1, 1));
     }
 }

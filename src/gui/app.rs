@@ -345,7 +345,7 @@ impl eframe::App for GuiApp {
                     if let Ok(history) = view.history.lock() {
                         chart::show(
                             ui,
-                            &history.samples,
+                            &history,
                             &mut self.period,
                             &mut self.chart_order,
                             summary.nominal,
