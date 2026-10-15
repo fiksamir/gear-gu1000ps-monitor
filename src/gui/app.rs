@@ -335,6 +335,7 @@ impl eframe::App for GuiApp {
             .show(ui, |ui| match self.tab {
                 Tab::Status => {
                     egui::ScrollArea::vertical()
+                        .id_salt("status")
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
                             self.status_tab(ui, &ctx, &view, &summary);
@@ -614,6 +615,7 @@ impl GuiApp {
 
     fn settings_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, status: Option<&Status>) {
         egui::ScrollArea::vertical()
+            .id_salt("settings")
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 if ui.available_width() >= theme::WIDE_MIN {
@@ -828,6 +830,7 @@ fn events_tab(ui: &mut egui::Ui, view: &View) {
     });
     theme::card(ui, "ПОДІЇ", |ui| {
         egui::ScrollArea::vertical()
+            .id_salt("events")
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 if view.events.is_empty() {
@@ -875,13 +878,14 @@ fn log_tab(ui: &mut egui::Ui, view: &View) {
         .inner_margin(12)
         .show(ui, |ui| {
             egui::ScrollArea::vertical()
-                .stick_to_bottom(true)
+                .id_salt("log")
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     if view.log.is_empty() {
                         ui.label(RichText::new("Журнал порожній.").color(theme::WEAK));
                     }
-                    for line in view.log.iter() {
+                    // Newest first, like the Events tab.
+                    for line in view.log.iter().rev() {
                         ui.label(
                             RichText::new(line)
                                 .monospace()
