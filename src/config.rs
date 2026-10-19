@@ -35,6 +35,10 @@ pub struct Config {
     pub battery_ah: f64,
     /// Warn when the UPS temperature sensor reaches this, °C (0 = never).
     pub temp_alarm_c: u32,
+    /// Beeper state chosen in the window. The UPS forgets it (back on after
+    /// the PC is off), so the service sets it again. Unset: left alone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub beeper_on: Option<bool>,
 }
 
 impl Default for Config {
@@ -50,6 +54,7 @@ impl Default for Config {
             ups_power_w: 600,
             battery_ah: 7.0,
             temp_alarm_c: 55,
+            beeper_on: None,
         }
     }
 }

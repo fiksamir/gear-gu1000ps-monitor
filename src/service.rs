@@ -113,6 +113,12 @@ fn run_service() -> windows_service::Result<()> {
                 if cfg != m.cfg {
                     log(&format!("налаштування змінено: {cfg:?}"));
                     poll_interval = Duration::from_secs(cfg.poll_interval_secs);
+                    if cfg.beeper_on != m.cfg.beeper_on {
+                        // The window has just toggled it; give the UPS time
+                        // to report the new state before checking it.
+                        m.beeper_sent_at = Some(Instant::now());
+                        m.beeper_tries = 0;
+                    }
                     m.cfg = cfg;
                 }
             }
@@ -146,6 +152,9 @@ struct Monitor {
     raw_changed_at: Instant,
     frozen: bool,
     hot: bool,
+    /// Restoring the configured beeper state: last toggle and failed tries.
+    beeper_sent_at: Option<Instant>,
+    beeper_tries: u32,
 }
 
 /// Mains voltage and load jitter every few seconds, so a Q1 line that stays
@@ -168,6 +177,8 @@ impl Monitor {
             raw_changed_at: Instant::now(),
             frozen: false,
             hot: false,
+            beeper_sent_at: None,
+            beeper_tries: 0,
         }
     }
 
@@ -287,6 +298,7 @@ impl Monitor {
 
     fn handle(&mut self, s: Status) {
         let prev = self.last.take();
+        self.restore_beeper(&s);
 
         match &prev {
             None => {
@@ -502,8 +514,39 @@ impl Monitor {
         }
     }
 
+    /// The UPS turns its beeper back on after the PC was off; set it to the
+    /// state chosen in the window. Not on battery (the user may have just
+    /// silenced it on the UPS), at most once a minute and three times in a
+    /// row, so a UPS that ignores the toggle is not poked forever.
+    fn restore_beeper(&mut self, s: &Status) {
+        let Some(want) = self.cfg.beeper_on else {
+            return;
+        };
+        if s.beeper_on() == want {
+            self.beeper_tries = 0;
+            return;
+        }
+        if s.on_battery()
+            || self.beeper_tries >= 3
+            || self
+                .beeper_sent_at
+                .is_some_and(|t| t.elapsed() < Duration::from_secs(60))
+        {
+            return;
+        }
+        self.beeper_sent_at = Some(Instant::now());
+        self.beeper_tries += 1;
+        let what = if want {
+            "звук ДБЖ скинувся, вмикаю"
+        } else {
+            "звук ДБЖ скинувся, вимикаю"
+        };
+        self.send(protocol::IDX_BEEPER_TOGGLE, what);
+    }
+
     /// Back from sleep/hibernate: whatever was armed must not fire now.
     fn on_resume(&mut self) {
+        self.beeper_tries = 0;
         log("вихід зі сну");
         self.ups_off_sent = false;
         self.pc_shutdown_requested = false;

@@ -650,6 +650,15 @@ impl GuiApp {
                     *o = None;
                 }
                 backend::toggle_ups_beeper(&self.beeper_outcome, ctx);
+                // Remembered so the service can set it again after the UPS
+                // forgets it.
+                let want = Some(!st.beeper_on());
+                let mut cfg = self.saved.clone();
+                cfg.beeper_on = want;
+                if cfg.save().is_ok() {
+                    self.saved.beeper_on = want;
+                    self.form.beeper_on = want;
+                }
             }
             ui.label(
                 RichText::new(
