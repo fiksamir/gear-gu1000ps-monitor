@@ -17,8 +17,8 @@ use crate::tray::Level;
 
 /// At most this many buckets per line; each contributes its mean.
 const MAX_BUCKETS: u64 = 800;
-/// Points on each side averaged into every point of a line.
-const SMOOTH_RADIUS: usize = 3;
+/// Curve points drawn between two neighbouring points of a line.
+const SPLINE_STEPS: usize = 6;
 const DAY: i64 = 86_400;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -147,6 +147,47 @@ fn smooth(seg: &[[f64; 2]], radius: usize, step: f64) -> Segment {
             [x, sum / n]
         })
         .collect()
+}
+
+/// Points on each side averaged into every point: more for longer periods,
+/// whose buckets come from fewer, patchier readings.
+fn smooth_radius(bucket: u64) -> usize {
+    match bucket {
+        0..=99 => 3,
+        100..=999 => 5,
+        _ => 8,
+    }
+}
+
+/// The line as a Catmull-Rom curve through its points, for drawing. Each
+/// piece stays within the values of its two ends, so a sharp jump (a power
+/// cut) does not overshoot.
+fn spline(seg: &[[f64; 2]]) -> Segment {
+    if seg.len() < 3 {
+        return seg.to_vec();
+    }
+    let mut out = Vec::with_capacity((seg.len() - 1) * SPLINE_STEPS + 1);
+    for i in 0..seg.len() - 1 {
+        let p0 = seg[i.saturating_sub(1)];
+        let (p1, p2) = (seg[i], seg[i + 1]);
+        let p3 = seg[(i + 2).min(seg.len() - 1)];
+        let (lo, hi) = (p1[1].min(p2[1]), p1[1].max(p2[1]));
+        for k in 0..SPLINE_STEPS {
+            let t = k as f64 / SPLINE_STEPS as f64;
+            let (t2, t3) = (t * t, t * t * t);
+            let at = |a: f64, b: f64, c: f64, d: f64| {
+                0.5 * (2.0 * b
+                    + (c - a) * t
+                    + (2.0 * a - 5.0 * b + 4.0 * c - d) * t2
+                    + (3.0 * b - a - 3.0 * c + d) * t3)
+            };
+            let x = p1[0] + (p2[0] - p1[0]) * t;
+            let y = at(p0[1], p1[1], p2[1], p3[1]).clamp(lo, hi);
+            out.push([x, y]);
+        }
+    }
+    out.push(seg[seg.len() - 1]);
+    out
 }
 
 /// Local time minus UTC, in seconds, rounded to a quarter hour.
@@ -627,7 +668,7 @@ fn plot(
                 ));
                 let segs = segs
                     .iter()
-                    .map(|g| smooth(g, SMOOTH_RADIUS, min_span / 2.0))
+                    .map(|g| smooth(g, smooth_radius(c.bucket), min_span / 2.0))
                     .collect();
                 (s, segs)
             })
@@ -689,7 +730,7 @@ fn plot(
                 plot_ui.set_plot_bounds_y(y_range);
                 for (s, segs) in &lines {
                     for seg in segs {
-                        plot_ui.line(Line::new(s.name, seg.clone()).color(s.color).width(1.5));
+                        plot_ui.line(Line::new(s.name, spline(seg)).color(s.color).width(1.5));
                     }
                     // Gaps (PC off, no readings) are bridged with a faint
                     // dashed line, so the trend reads as one line.
@@ -774,6 +815,18 @@ mod tests {
         ];
         let segs = segments(&s, 0, 60, 0, GAP_SECS, |s| s.input_v);
         assert_eq!(segs, vec![vec![[15.0, 4.75], [60.0, 7.0]]]);
+    }
+
+    #[test]
+    fn spline_passes_through_points_without_overshoot() {
+        let seg = [[0.0, 10.0], [1.0, 10.0], [2.0, 0.0], [3.0, 0.0]];
+        let out = spline(&seg);
+        assert_eq!(out.len(), 3 * SPLINE_STEPS + 1);
+        assert_eq!(out[0], [0.0, 10.0]);
+        assert_eq!(out[SPLINE_STEPS], [1.0, 10.0]);
+        assert_eq!(out[2 * SPLINE_STEPS], [2.0, 0.0]);
+        assert_eq!(*out.last().unwrap(), [3.0, 0.0]);
+        assert!(out.iter().all(|p| (0.0..=10.0).contains(&p[1])));
     }
 
     #[test]
