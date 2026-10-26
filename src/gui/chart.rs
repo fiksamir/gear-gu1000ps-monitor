@@ -774,7 +774,10 @@ fn plot(
             .iter()
             .filter(|(_, segs)| segs.len() > 1)
             .filter_map(|(s, _)| s.gap_value)
-            .fold(y_range, |r, v| r.start().min(v)..=*r.end());
+            // A little below it, so the line along it clears the frame.
+            .fold(y_range, |r, v| {
+                r.start().min(v - (r.end() - v) * 0.04)..=*r.end()
+            });
         // Charge never exceeds 100 %, so the axis stops there.
         let y_range = if kind == Kind::Charge {
             *y_range.start()..=y_range.end().min(101.0)
