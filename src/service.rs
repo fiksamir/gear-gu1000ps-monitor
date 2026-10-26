@@ -33,6 +33,9 @@ const HYBRID_EVENT_WINDOW_SECS: u32 = 30;
 /// How long to wait for that event to reach the log: it is stored a moment
 /// after the suspend notification, and the PC sleeps soon after that.
 const HYBRID_EVENT_WAIT: Duration = Duration::from_millis(1500);
+/// How long after start or resume the service waits before restoring the
+/// beeper state (see `restore_beeper`).
+const BEEPER_RESTORE_DELAY: Duration = Duration::from_secs(300);
 
 define_windows_service!(ffi_service_main, service_main);
 
@@ -116,8 +119,8 @@ fn run_service() -> windows_service::Result<()> {
                     if cfg.beeper_on != m.cfg.beeper_on {
                         // The window has just toggled it; give the UPS time
                         // to report the new state before checking it.
-                        m.beeper_sent_at = Some(Instant::now());
-                        m.beeper_tries = 0;
+                        m.beeper_not_before = Instant::now() + Duration::from_secs(60);
+                        m.beeper_tried = false;
                     }
                     m.cfg = cfg;
                 }
@@ -152,9 +155,10 @@ struct Monitor {
     raw_changed_at: Instant,
     frozen: bool,
     hot: bool,
-    /// Restoring the configured beeper state: last toggle and failed tries.
-    beeper_sent_at: Option<Instant>,
-    beeper_tries: u32,
+    /// Restoring the configured beeper state: not before this moment, and
+    /// whether the one try for this start or resume is used up.
+    beeper_not_before: Instant,
+    beeper_tried: bool,
 }
 
 /// Mains voltage and load jitter every few seconds, so a Q1 line that stays
@@ -177,8 +181,8 @@ impl Monitor {
             raw_changed_at: Instant::now(),
             frozen: false,
             hot: false,
-            beeper_sent_at: None,
-            beeper_tries: 0,
+            beeper_not_before: Instant::now() + BEEPER_RESTORE_DELAY,
+            beeper_tried: false,
         }
     }
 
@@ -515,27 +519,21 @@ impl Monitor {
     }
 
     /// The UPS turns its beeper back on after the PC was off; set it to the
-    /// state chosen in the window. Not on battery (the user may have just
-    /// silenced it on the UPS), at most once a minute and three times in a
-    /// row, so a UPS that ignores the toggle is not poked forever.
+    /// state chosen in the window. The toggle sometimes hangs the UPS's USB
+    /// bridge, so only once per start or resume, a few minutes in, and not
+    /// on battery (the user may have just silenced it on the UPS).
     fn restore_beeper(&mut self, s: &Status) {
         let Some(want) = self.cfg.beeper_on else {
             return;
         };
-        if s.beeper_on() == want {
-            self.beeper_tries = 0;
-            return;
-        }
-        if s.on_battery()
-            || self.beeper_tries >= 3
-            || self
-                .beeper_sent_at
-                .is_some_and(|t| t.elapsed() < Duration::from_secs(60))
+        if s.beeper_on() == want
+            || s.on_battery()
+            || self.beeper_tried
+            || Instant::now() < self.beeper_not_before
         {
             return;
         }
-        self.beeper_sent_at = Some(Instant::now());
-        self.beeper_tries += 1;
+        self.beeper_tried = true;
         let what = if want {
             "звук ДБЖ скинувся, вмикаю"
         } else {
@@ -546,7 +544,8 @@ impl Monitor {
 
     /// Back from sleep/hibernate: whatever was armed must not fire now.
     fn on_resume(&mut self) {
-        self.beeper_tries = 0;
+        self.beeper_not_before = Instant::now() + BEEPER_RESTORE_DELAY;
+        self.beeper_tried = false;
         log("вихід зі сну");
         self.ups_off_sent = false;
         self.pc_shutdown_requested = false;
