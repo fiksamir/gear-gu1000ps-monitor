@@ -149,14 +149,11 @@ fn smooth(seg: &[[f64; 2]], radius: usize, step: f64) -> Segment {
         .collect()
 }
 
-/// Points on each side averaged into every point: more for longer periods,
-/// whose buckets come from fewer, patchier readings.
-fn smooth_radius(bucket: u64) -> usize {
-    match bucket {
-        0..=99 => 3,
-        100..=999 => 5,
-        _ => 8,
-    }
+/// Points on each side averaged into every point: about a sixtieth of the
+/// period, so the sensors' rounding staircase (whole degrees, 0.1 V) is
+/// smoothed out at every scale. A point is one bucket, at least one poll.
+fn smooth_radius(span: u64, bucket: u64) -> usize {
+    ((span / 60) / bucket.max(5)).clamp(3, 15) as usize
 }
 
 /// The line as a Catmull-Rom curve through its points, for drawing. Each
@@ -526,6 +523,7 @@ pub fn show(
             let last = order.len() - 1;
             let mut cell = |ui: &mut egui::Ui, i: usize| {
                 let ctx = PlotCtx {
+                    span,
                     samples,
                     older,
                     height,
@@ -569,6 +567,7 @@ enum Move {
 }
 
 struct PlotCtx<'a> {
+    span: u64,
     samples: &'a [Sample],
     /// Archive means from before `samples` begin.
     older: &'a [Sample],
@@ -668,7 +667,7 @@ fn plot(
                 ));
                 let segs = segs
                     .iter()
-                    .map(|g| smooth(g, smooth_radius(c.bucket), min_span / 2.0))
+                    .map(|g| smooth(g, smooth_radius(c.span, c.bucket), min_span / 2.0))
                     .collect();
                 (s, segs)
             })
