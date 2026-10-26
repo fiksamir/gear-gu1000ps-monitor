@@ -23,6 +23,7 @@ const OUTCOME_OK_TTL: Duration = Duration::from_secs(8);
 const OUTCOME_ERR_TTL: Duration = Duration::from_secs(20);
 /// Frame interval while the power-flow diagram is animating.
 const ANIMATION_FRAME: Duration = Duration::from_millis(50);
+const REPO_URL: &str = "https://github.com/fiksamir/gear-gu1000ps-monitor";
 /// How long after a `--tray` start the window is hidden again if it shows.
 const START_HIDE_WINDOW: Duration = Duration::from_secs(5);
 
@@ -55,6 +56,8 @@ pub struct GuiApp {
     beeper_outcome: Outcome,
     /// The result message on screen and when it first appeared.
     outcome_since: Option<(Result<String, String>, Instant)>,
+    show_about: bool,
+    about_icon: Option<egui::TextureHandle>,
 }
 
 struct Summary {
@@ -97,6 +100,8 @@ impl GuiApp {
             settings_msg,
             beeper_outcome: Outcome::default(),
             outcome_since: None,
+            show_about: false,
+            about_icon: None,
         }
     }
 
@@ -317,17 +322,24 @@ impl eframe::App for GuiApp {
             .show(ui, |ui| {
                 theme::banner(ui, summary.level.color(), &summary.title, &summary.detail);
                 ui.add_space(10.0);
-                theme::segmented(
-                    ui,
-                    &mut self.tab,
-                    &[
-                        (Tab::Status, "🏠  Стан"),
-                        (Tab::Chart, "📈  Графік"),
-                        (Tab::Events, "⚡  Події"),
-                        (Tab::Settings, "⚙  Налаштування"),
-                        (Tab::Log, "☰  Журнал"),
-                    ],
-                );
+                ui.horizontal(|ui| {
+                    theme::segmented(
+                        ui,
+                        &mut self.tab,
+                        &[
+                            (Tab::Status, "🏠  Стан"),
+                            (Tab::Chart, "📈  Графік"),
+                            (Tab::Events, "⚡  Події"),
+                            (Tab::Settings, "⚙  Налаштування"),
+                            (Tab::Log, "☰  Журнал"),
+                        ],
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("ℹ  Про програму").clicked() {
+                            self.show_about = true;
+                        }
+                    });
+                });
             });
 
         egui::CentralPanel::default()
@@ -361,6 +373,9 @@ impl eframe::App for GuiApp {
 
         if self.confirm_test {
             self.test_dialog(&ctx);
+        }
+        if self.show_about {
+            self.about_dialog(&ctx, &view, &summary);
         }
     }
 }
@@ -611,6 +626,111 @@ impl GuiApp {
                 }
             });
         });
+    }
+
+    /// Name, version and build, what the program is talking to, links.
+    fn about_dialog(&mut self, ctx: &egui::Context, view: &View, summary: &Summary) {
+        let icon = self
+            .about_icon
+            .get_or_insert_with(|| {
+                let rgba = crate::tray::icon_rgba(Level::Ok, 96);
+                ctx.load_texture(
+                    "about_icon",
+                    egui::ColorImage::from_rgba_unmultiplied([96, 96], &rgba),
+                    Default::default(),
+                )
+            })
+            .clone();
+        let version = match env!("GIT_HASH") {
+            "" => env!("CARGO_PKG_VERSION").to_string(),
+            hash => format!("{} ({hash})", env!("CARGO_PKG_VERSION")),
+        };
+        let modal = egui::Modal::new(egui::Id::new("about")).show(ctx, |ui| {
+            ui.set_width(460.0);
+            egui::Frame::new()
+                .fill(theme::ACCENT)
+                .corner_radius(10)
+                .inner_margin(18)
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Image::new((icon.id(), egui::vec2(56.0, 56.0))));
+                        ui.add_space(10.0);
+                        ui.vertical(|ui| {
+                            ui.label(
+                                RichText::new("ДБЖ GEAR")
+                                    .size(26.0)
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
+                            );
+                            ui.label(
+                                RichText::new("Монітор і захист ПК для GEAR GU-1000PS")
+                                    .color(egui::Color32::from_white_alpha(220)),
+                            );
+                        });
+                    });
+                    ui.add_space(12.0);
+                    ui.label(
+                        RichText::new(format!("Версія   {version}"))
+                            .strong()
+                            .color(egui::Color32::WHITE),
+                    );
+                });
+            ui.add_space(12.0);
+            let service = match view.service {
+                SvcState::Running => "працює",
+                SvcState::Stopped => "зупинена",
+                SvcState::Pending => "змінює стан",
+                SvcState::NotInstalled => "не встановлена",
+                SvcState::Unknown => "невідомо",
+            };
+            let ups = if summary.status.is_some() {
+                format!("на зв'язку, батарея {:.0} В", summary.nominal)
+            } else {
+                "немає зв'язку".to_string()
+            };
+            let data_dir = gear_ups::winutil::data_dir();
+            egui::Grid::new("about_grid")
+                .num_columns(2)
+                .spacing([16.0, 6.0])
+                .show(ui, |ui| {
+                    let row = |ui: &mut egui::Ui, k: &str, v: &str| {
+                        ui.label(RichText::new(k).color(theme::WEAK));
+                        ui.label(v);
+                        ui.end_row();
+                    };
+                    row(ui, "Служба GearUps", service);
+                    row(ui, "ДБЖ", &ups);
+                    row(ui, "Зв'язок", "USB (0001:0000), протокол Megatec Q1");
+                    row(ui, "Дані й журнал", &data_dir.display().to_string());
+                });
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                if ui.link("GitHub").clicked() {
+                    backend::open_url(REPO_URL);
+                }
+                ui.add_space(16.0);
+                if ui.link("Ліцензія MIT").clicked() {
+                    backend::open_url(&format!("{REPO_URL}/blob/main/LICENSE"));
+                }
+                ui.add_space(16.0);
+                if ui.link("Відкрити папку даних").clicked() {
+                    backend::open_data_dir();
+                }
+            });
+            ui.add_space(10.0);
+            ui.label(
+                RichText::new("© 2026 Denys Yevdokymenko. Поширюється за ліцензією MIT.")
+                    .size(12.0)
+                    .color(theme::WEAK),
+            );
+            ui.add_space(8.0);
+            ui.vertical_centered(|ui| ui.button("Закрити").clicked())
+                .inner
+        });
+        if modal.inner || modal.should_close() {
+            self.show_about = false;
+        }
     }
 
     fn settings_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, status: Option<&Status>) {

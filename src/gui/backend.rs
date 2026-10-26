@@ -268,6 +268,11 @@ pub fn start_service() -> Result<String, String> {
     Ok("Запуск служби…".into())
 }
 
+/// Opens a web page in the default browser.
+pub fn open_url(url: &str) {
+    let _ = std::process::Command::new("explorer.exe").arg(url).spawn();
+}
+
 pub fn open_data_dir() {
     let _ = std::process::Command::new("explorer.exe")
         .arg(data_dir())
