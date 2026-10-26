@@ -5,8 +5,8 @@ use std::ops::RangeInclusive;
 
 use eframe::egui::{self, Color32, RichText};
 use egui_plot::{
-    uniform_grid_spacer, Corner, GridInput, GridMark, HoverPosition, Legend, Line, Plot, PlotPoint,
-    Text,
+    uniform_grid_spacer, Corner, GridInput, GridMark, HoverPosition, Legend, Line, LineStyle, Plot,
+    PlotPoint, Text,
 };
 use windows_sys::Win32::Foundation::SYSTEMTIME;
 use windows_sys::Win32::System::SystemInformation::GetLocalTime;
@@ -368,7 +368,14 @@ pub fn show(
     }
 
     let offset = utc_offset_secs(now);
-    let bucket = span / MAX_BUCKETS;
+    // Long periods are mostly short stretches between PC-off gaps; coarser
+    // buckets smooth those out.
+    let buckets = if span > 2 * DAY as u64 {
+        MAX_BUCKETS / 2
+    } else {
+        MAX_BUCKETS
+    };
+    let bucket = span / buckets;
     let x_range = (from as i64 + offset) as f64..=(now as i64 + offset) as f64;
     let labels = Labels::for_span(span);
     let blue = Color32::from_rgb(66, 133, 244);
@@ -676,6 +683,18 @@ fn plot(
                 for (s, segs) in &lines {
                     for seg in segs {
                         plot_ui.line(Line::new(s.name, seg.clone()).color(s.color).width(1.5));
+                    }
+                    // Gaps (PC off, no readings) are bridged with a faint
+                    // dashed line, so the trend reads as one line.
+                    for pair in segs.windows(2) {
+                        if let (Some(&a), Some(&b)) = (pair[0].last(), pair[1].first()) {
+                            plot_ui.line(
+                                Line::new(s.name, vec![a, b])
+                                    .color(s.color.gamma_multiply(0.45))
+                                    .width(1.0)
+                                    .style(LineStyle::dashed_loose()),
+                            );
+                        }
                     }
                     // The latest value stays visible at the end of the line.
                     if let Some(&[x, y]) = segs.last().and_then(|seg| seg.last()) {
