@@ -633,6 +633,13 @@ fn plot(
             })
             .collect();
         let y_range = fit_y(&lines, min_span);
+        // Charge never exceeds 100 %, so the axis stops there.
+        let y_range = if kind == Kind::Charge {
+            *y_range.start()..=y_range.end().min(101.0)
+        } else {
+            y_range
+        };
+        let (y_top, y_span) = (*y_range.end(), y_range.end() - y_range.start());
         let hover_text = value_text.clone();
         let hover_points: Vec<(&'static str, Segment)> = lines
             .iter()
@@ -688,8 +695,9 @@ fn plot(
                     // dashed line, so the trend reads as one line.
                     for pair in segs.windows(2) {
                         if let (Some(&a), Some(&b)) = (pair[0].last(), pair[1].first()) {
+                            // Unnamed, so the legend keeps the series colour.
                             plot_ui.line(
-                                Line::new(s.name, vec![a, b])
+                                Line::new("", vec![a, b])
                                     .color(s.color.gamma_multiply(0.45))
                                     .width(1.0)
                                     .style(LineStyle::dashed_loose()),
@@ -698,13 +706,19 @@ fn plot(
                     }
                     // The latest value stays visible at the end of the line.
                     if let Some(&[x, y]) = segs.last().and_then(|seg| seg.last()) {
+                        // Below the line when there is no room above it.
+                        let anchor = if y > y_top - y_span * 0.15 {
+                            egui::Align2::RIGHT_TOP
+                        } else {
+                            egui::Align2::RIGHT_BOTTOM
+                        };
                         plot_ui.text(
                             Text::new(
                                 "",
                                 PlotPoint::new(x, y),
                                 RichText::new(value_text(y)).color(s.color).strong(),
                             )
-                            .anchor(egui::Align2::RIGHT_BOTTOM),
+                            .anchor(anchor),
                         );
                     }
                 }
