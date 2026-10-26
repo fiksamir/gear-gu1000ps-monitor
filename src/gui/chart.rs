@@ -156,6 +156,32 @@ fn smooth_radius(span: u64, bucket: u64) -> usize {
     ((span / 60) / bucket.max(5)).clamp(3, 15) as usize
 }
 
+/// Gaussian average over time (sigma in seconds), cut at three sigma.
+/// Neighbours further than `step` from the point are left out, as in
+/// `smooth`, so real jumps stay sharp.
+fn smooth_time(points: &[[f64; 2]], sigma: f64, step: f64) -> Segment {
+    let reach = 3.0 * sigma;
+    let mut lo = 0;
+    points
+        .iter()
+        .map(|&[x, y]| {
+            while points[lo][0] < x - reach {
+                lo += 1;
+            }
+            let (sum, weight) = points[lo..]
+                .iter()
+                .take_while(|p| p[0] <= x + reach)
+                .filter(|p| (p[1] - y).abs() <= step)
+                .fold((0.0, 0.0), |(sum, weight), p| {
+                    let d = (p[0] - x) / sigma;
+                    let w = (-0.5 * d * d).exp();
+                    (sum + w * p[1], weight + w)
+                });
+            [x, sum / weight]
+        })
+        .collect()
+}
+
 /// The line as a Catmull-Rom curve through its points, for drawing. Each
 /// piece stays within the values of its two ends, so a sharp jump (a power
 /// cut) does not overshoot.
@@ -665,10 +691,16 @@ fn plot(
                 segs.extend(segments(
                     c.samples, c.from, c.bucket, c.offset, GAP_SECS, s.value,
                 ));
-                let segs = segs
-                    .iter()
-                    .map(|g| smooth(g, smooth_radius(c.span, c.bucket), min_span / 2.0))
-                    .collect();
+                let segs = if c.span > 2 * DAY as u64 {
+                    // Long periods are short stretches between PC-off gaps;
+                    // one curve smoothed over time across them reads better.
+                    let all = segs.concat();
+                    vec![smooth_time(&all, c.span as f64 / 120.0, min_span / 2.0)]
+                } else {
+                    segs.iter()
+                        .map(|g| smooth(g, smooth_radius(c.span, c.bucket), min_span / 2.0))
+                        .collect()
+                };
                 (s, segs)
             })
             .collect();
@@ -814,6 +846,16 @@ mod tests {
         ];
         let segs = segments(&s, 0, 60, 0, GAP_SECS, |s| s.input_v);
         assert_eq!(segs, vec![vec![[15.0, 4.75], [60.0, 7.0]]]);
+    }
+
+    #[test]
+    fn time_smoothing_spans_gaps_but_keeps_jumps() {
+        let pts = [[0.0, 40.0], [10.0, 44.0], [1000.0, 42.0], [1010.0, 10.0]];
+        let out = smooth_time(&pts, 400.0, 5.0);
+        // Points across the gap blend; the jump to 10 is left out.
+        assert!(out[1][1] > 40.0 && out[1][1] < 44.0, "{:?}", out[1]);
+        assert!((out[2][1] - 42.0).abs() < 2.0, "{:?}", out[2]);
+        assert_eq!(out[3], [1010.0, 10.0]);
     }
 
     #[test]
