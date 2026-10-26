@@ -182,6 +182,45 @@ fn smooth_time(points: &[[f64; 2]], sigma: f64, step: f64) -> Segment {
         .collect()
 }
 
+/// The segments drawn as one curve through all their points, cut into
+/// pieces flagged `true` where they span a gap between segments. With
+/// `gap_value` a gap instead drops to that value (within `drop` seconds)
+/// and stays there.
+fn pieces(segs: &[Segment], gap_value: Option<f64>, drop: f64) -> Vec<(bool, Segment)> {
+    let merged = segs.concat();
+    if merged.len() < 3 {
+        return segs.iter().map(|g| (false, g.clone())).collect();
+    }
+    // Interval j joins points j and j + 1; it is a gap at a segment's end.
+    let mut gap = vec![false; merged.len() - 1];
+    let mut end = 0;
+    for g in &segs[..segs.len() - 1] {
+        end += g.len();
+        if end > 0 {
+            gap[end - 1] = true;
+        }
+    }
+    let curve = spline(&merged);
+    let mut out = Vec::new();
+    let mut start = 0;
+    for j in 1..=gap.len() {
+        if j == gap.len() || gap[j] != gap[start] {
+            let piece = match gap_value {
+                // A gap is a single interval: the step down and back up.
+                Some(v) if gap[start] => {
+                    let ([ax, ay], [bx, by]) = (merged[start], merged[j]);
+                    let d = drop.min((bx - ax) / 4.0);
+                    vec![[ax, ay], [ax + d, v], [bx - d, v], [bx, by]]
+                }
+                _ => curve[start * SPLINE_STEPS..=j * SPLINE_STEPS].to_vec(),
+            };
+            out.push((gap[start], piece));
+            start = j;
+        }
+    }
+    out
+}
+
 /// The line as a Catmull-Rom curve through its points, for drawing. Each
 /// piece stays within the values of its two ends, so a sharp jump (a power
 /// cut) does not overshoot.
@@ -326,6 +365,9 @@ struct Series {
     name: &'static str,
     color: Color32,
     value: fn(&Sample) -> f32,
+    /// What the value is while there are no readings (PC off), if known:
+    /// the load is then 0. Other series just bridge the gap.
+    gap_value: Option<f64>,
 }
 
 /// One of the stacked plots; the user can reorder them.
@@ -476,11 +518,13 @@ pub fn show(
                     name: "Вхід (мережа)",
                     color: blue,
                     value: |s| s.input_v,
+                    gap_value: None,
                 },
                 Series {
                     name: "Вихід",
                     color: Level::Ok.color(),
                     value: |s| s.output_v,
+                    gap_value: None,
                 },
             ],
             ctx,
@@ -500,6 +544,7 @@ pub fn show(
                 name: "Навантаження",
                 color: Color32::from_rgb(171, 71, 188),
                 value: |s| s.load_pct,
+                gap_value: Some(0.0),
             }],
             ctx,
         ),
@@ -513,6 +558,7 @@ pub fn show(
                 name: "Батарея",
                 color: Level::Warn.color(),
                 value: |s| s.battery_v,
+                gap_value: None,
             }],
             ctx,
         ),
@@ -526,6 +572,7 @@ pub fn show(
                 name: "Заряд (від ДБЖ)",
                 color: Color32::from_rgb(67, 160, 71),
                 value: |s| s.charge_pct,
+                gap_value: None,
             }],
             ctx,
         ),
@@ -539,6 +586,7 @@ pub fn show(
                 name: "Температура",
                 color: Color32::from_rgb(0, 150, 136),
                 value: |s| s.temp_c,
+                gap_value: None,
             }],
             ctx,
         ),
@@ -691,11 +739,27 @@ fn plot(
                 segs.extend(segments(
                     c.samples, c.from, c.bucket, c.offset, GAP_SECS, s.value,
                 ));
-                let segs = if c.span > 2 * DAY as u64 {
+                let segs = if c.span > 2 * DAY as u64 && s.gap_value.is_some() {
+                    // Known value in the gaps: smooth each stretch alone.
+                    segs.iter()
+                        .map(|g| smooth_time(g, c.span as f64 / 120.0, min_span / 2.0))
+                        .collect()
+                } else if c.span > 2 * DAY as u64 {
                     // Long periods are short stretches between PC-off gaps;
                     // one curve smoothed over time across them reads better.
-                    let all = segs.concat();
-                    vec![smooth_time(&all, c.span as f64 / 120.0, min_span / 2.0)]
+                    // Smoothed across the gaps, so both sides of a gap
+                    // lean towards each other, then split back so the gaps
+                    // still show.
+                    let smoothed =
+                        smooth_time(&segs.concat(), c.span as f64 / 120.0, min_span / 2.0);
+                    let mut rest = &smoothed[..];
+                    segs.iter()
+                        .map(|g| {
+                            let (part, tail) = rest.split_at(g.len());
+                            rest = tail;
+                            part.to_vec()
+                        })
+                        .collect()
                 } else {
                     segs.iter()
                         .map(|g| smooth(g, smooth_radius(c.span, c.bucket), min_span / 2.0))
@@ -705,6 +769,12 @@ fn plot(
             })
             .collect();
         let y_range = fit_y(&lines, min_span);
+        // A known gap value (the load's 0) must stay in view.
+        let y_range = lines
+            .iter()
+            .filter(|(_, segs)| segs.len() > 1)
+            .filter_map(|(s, _)| s.gap_value)
+            .fold(y_range, |r, v| r.start().min(v)..=*r.end());
         // Charge never exceeds 100 %, so the axis stops there.
         let y_range = if kind == Kind::Charge {
             *y_range.start()..=y_range.end().min(101.0)
@@ -760,20 +830,20 @@ fn plot(
                 plot_ui.set_plot_bounds_x(c.x_range);
                 plot_ui.set_plot_bounds_y(y_range);
                 for (s, segs) in &lines {
-                    for seg in segs {
-                        plot_ui.line(Line::new(s.name, spline(seg)).color(s.color).width(1.5));
-                    }
-                    // Gaps (PC off, no readings) are bridged with a faint
-                    // dashed line, so the trend reads as one line.
-                    for pair in segs.windows(2) {
-                        if let (Some(&a), Some(&b)) = (pair[0].last(), pair[1].first()) {
+                    // One curve: solid over readings, faint and dashed over
+                    // gaps (PC off), so the trend reads as one line.
+                    let drop = (c.bucket as f64).max(GAP_SECS as f64);
+                    for (gap, piece) in pieces(segs, s.gap_value, drop) {
+                        if gap {
                             // Unnamed, so the legend keeps the series colour.
                             plot_ui.line(
-                                Line::new("", vec![a, b])
+                                Line::new("", piece)
                                     .color(s.color.gamma_multiply(0.45))
                                     .width(1.0)
                                     .style(LineStyle::dashed_loose()),
                             );
+                        } else {
+                            plot_ui.line(Line::new(s.name, piece).color(s.color).width(1.5));
                         }
                     }
                     // The latest value stays visible at the end of the line.
@@ -859,6 +929,23 @@ mod tests {
     }
 
     #[test]
+    fn pieces_flag_the_gaps() {
+        let segs = vec![
+            vec![[0.0, 1.0], [1.0, 1.0]],
+            vec![[5.0, 2.0], [6.0, 2.0], [7.0, 2.0]],
+        ];
+        let p = pieces(&segs, None, 1.0);
+        let flags: Vec<bool> = p.iter().map(|(g, _)| *g).collect();
+        assert_eq!(flags, [false, true, false]);
+        assert_eq!(p[1].1.first(), Some(&[1.0, 1.0]));
+        assert_eq!(p[1].1.last(), Some(&[5.0, 2.0]));
+        assert_eq!(p[2].1.last(), Some(&[7.0, 2.0]));
+        // The load drops to 0 in a gap.
+        let p = pieces(&segs, Some(0.0), 0.5);
+        assert_eq!(p[1].1, vec![[1.0, 1.0], [1.5, 0.0], [4.5, 0.0], [5.0, 2.0]]);
+    }
+
+    #[test]
     fn spline_passes_through_points_without_overshoot() {
         let seg = [[0.0, 10.0], [1.0, 10.0], [2.0, 0.0], [3.0, 0.0]];
         let out = spline(&seg);
@@ -910,6 +997,7 @@ mod tests {
             name: "t",
             color: Color32::BLACK,
             value: |s| s.temp_c,
+            gap_value: None,
         };
         let r = fit_y(&[(&s, vec![vec![[0.0, 44.0], [1.0, 46.0]]])], 10.0);
         assert!(*r.start() < 40.0 && *r.end() > 50.0, "{r:?}");
