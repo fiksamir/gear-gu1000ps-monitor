@@ -362,9 +362,12 @@ impl Monitor {
                     "надто довго без мережі"
                 };
                 log(&format!("вимикаю ПК: {why}"));
+                // A low battery leaves well under a minute (28.10: power was
+                // cut 55 s after the flag), so shut down without a countdown.
+                let grace = if low { 0 } else { 60 };
                 match winutil::shutdown_pc(
                     &format!("ДБЖ GEAR: {why}. Комп'ютер буде вимкнено."),
-                    60,
+                    grace,
                 ) {
                     Ok(()) => self.pc_shutdown_requested = true,
                     Err(e) => log(&format!("InitiateShutdown не вдався: {e}")),
