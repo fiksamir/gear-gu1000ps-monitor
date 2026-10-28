@@ -13,6 +13,7 @@ use windows_service::service::{
 use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
 use windows_service::{define_windows_service, service_dispatcher};
 
+use crate::battery::Gauge;
 use crate::config::{self, Config};
 use crate::hid::Ups;
 use crate::history;
@@ -116,6 +117,11 @@ fn run_service() -> windows_service::Result<()> {
                 if cfg != m.cfg {
                     log(&format!("налаштування змінено: {cfg:?}"));
                     poll_interval = Duration::from_secs(cfg.poll_interval_secs);
+                    if cfg.battery_ah != m.cfg.battery_ah && m.gauge.capacity_ah.is_some() {
+                        log("ємність батареї змінено в налаштуваннях: уточнення за розрядами почнеться заново");
+                        m.gauge.forget();
+                        m.gauge.save();
+                    }
                     if cfg.beeper_on != m.cfg.beeper_on {
                         // The window has just toggled it; give the UPS time
                         // to report the new state before checking it.
@@ -146,6 +152,8 @@ struct Monitor {
     last: Option<Status>,
     last_error: Option<String>,
     on_battery_since: Option<Instant>,
+    /// Charge counted from the load, and the capacity learned from discharges.
+    gauge: Gauge,
     pc_shutdown_requested: bool,
     ups_off_sent: bool,
     /// Last raw Q1 reply and when it last changed: the USB bridge can hang
@@ -174,6 +182,7 @@ impl Monitor {
             last: None,
             last_error: None,
             on_battery_since: None,
+            gauge: Gauge::load(),
             pc_shutdown_requested: false,
             ups_off_sent: false,
             last_raw: None,
@@ -350,6 +359,8 @@ impl Monitor {
             self.hot = false;
         }
 
+        self.count_charge(&s);
+
         if s.on_battery() {
             let since = *self.on_battery_since.get_or_insert_with(Instant::now);
             let limit = self.cfg.on_battery_shutdown_secs;
@@ -380,6 +391,42 @@ impl Monitor {
         self.last = Some(s);
     }
 
+    fn count_charge(&mut self, s: &Status) {
+        let now = snapshot::unix_now();
+        let configured = self.cfg.battery_ah as f32;
+        let today = || {
+            let date = winutil::now_string();
+            let d: Vec<&str> = date[..10].split('-').collect();
+            format!("{}.{}.{}", d[2], d[1], d[0])
+        };
+        let learned = if s.on_battery() {
+            let load_w = s.load_pct as f32 / 100.0 * self.cfg.ups_power_w as f32;
+            let capacity = self.gauge.capacity(configured);
+            let max_secs = (self.cfg.poll_interval_secs * 3).max(15);
+            self.gauge
+                .on_battery(now, max_secs, self.nominal_battery_v, capacity, load_w);
+            let learned = if s.battery_low() {
+                self.gauge.on_low(configured, &today())
+            } else {
+                None
+            };
+            self.gauge.save();
+            learned
+        } else if self.gauge.discharge_from.is_some() {
+            let learned = self.gauge.on_mains(now, configured, &today());
+            self.gauge.save();
+            learned
+        } else {
+            None
+        };
+        if let Some(l) = learned {
+            log(&format!(
+                "ємність батареї за цим розрядом: {:.1} А·год (була {:.1})",
+                l.new_ah, l.old_ah
+            ));
+        }
+    }
+
     fn publish(&self) {
         let connected = self.ups.is_some();
         let status = if connected { self.last.clone() } else { None };
@@ -392,6 +439,7 @@ impl Monitor {
         let pc_shutdown_in_secs = on_battery_secs
             .filter(|_| limit > 0 && !self.pc_shutdown_requested)
             .map(|secs| limit.saturating_sub(secs));
+        let capacity = self.gauge.capacity(self.cfg.battery_ah as f32);
         snapshot::write(&Snapshot {
             updated_unix: snapshot::unix_now(),
             time: winutil::now_string(),
@@ -409,6 +457,9 @@ impl Monitor {
             ups_off_sent: self.ups_off_sent,
             poll_interval_secs: self.cfg.poll_interval_secs,
             frozen_secs: self.frozen.then(|| self.raw_changed_at.elapsed().as_secs()),
+            battery_charge_pct: Some(self.gauge.charge_pct(snapshot::unix_now(), capacity)),
+            battery_capacity_ah: Some(capacity),
+            battery_learned_on: self.gauge.learned_on.clone(),
         });
     }
 

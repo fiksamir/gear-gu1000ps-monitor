@@ -32,6 +32,15 @@ pub struct Snapshot {
     /// counts as a hung USB bridge.
     #[serde(default)]
     pub frozen_secs: Option<u64>,
+    /// Battery charge counted from the load (see `battery::Gauge`), %.
+    #[serde(default)]
+    pub battery_charge_pct: Option<f32>,
+    /// Capacity the runtime is estimated from: learned, else configured.
+    #[serde(default)]
+    pub battery_capacity_ah: Option<f32>,
+    /// Date of the discharge the capacity was learned from.
+    #[serde(default)]
+    pub battery_learned_on: Option<String>,
 }
 
 pub fn path() -> PathBuf {

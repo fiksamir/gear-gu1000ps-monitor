@@ -87,7 +87,14 @@ struct Palette {
 
 /// Draws the diagram. Returns true while something is animated, so the
 /// caller keeps repainting.
-pub fn show(ui: &mut egui::Ui, s: &Status, nominal_battery_v: f32, ups_power_w: u32) -> bool {
+/// `counted_charge`: the service's charge count, preferred to the UPS's own.
+pub fn show(
+    ui: &mut egui::Ui,
+    s: &Status,
+    nominal_battery_v: f32,
+    ups_power_w: u32,
+    counted_charge: Option<u32>,
+) -> bool {
     let f = flow(s);
     let width = ui.available_width().min(720.0);
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, HEIGHT), Sense::hover());
@@ -186,7 +193,9 @@ pub fn show(ui: &mut egui::Ui, s: &Status, nominal_battery_v: f32, ups_power_w: 
         inverter_fill,
     );
 
-    let charge = s.charge_on_battery_pct(nominal_battery_v, watts(s.load_pct, ups_power_w) as f32);
+    let charge = counted_charge.unwrap_or_else(|| {
+        s.charge_on_battery_pct(nominal_battery_v, watts(s.load_pct, ups_power_w) as f32)
+    });
     let (bars, battery_color) = if from_battery {
         (
             charge.div_ceil(25).clamp(1, 4),

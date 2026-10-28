@@ -167,7 +167,7 @@ const CELL_RESISTANCE_OHM: f32 = 0.004;
 /// Per-cell voltage at and above which the charger is floating.
 const FLOAT_CELL_V: f32 = 2.22;
 /// Peukert exponent of a sealed lead-acid battery and its rating period.
-const PEUKERT_K: f32 = 1.15;
+pub const PEUKERT_K: f32 = 1.15;
 const PEUKERT_RATED_HOURS: f32 = 20.0;
 /// Below this the inverter's own consumption dominates.
 const MIN_LOAD_W: f32 = 20.0;
@@ -185,13 +185,17 @@ pub fn runtime_minutes(
     charge_pct: u32,
     load_w: f32,
 ) -> u32 {
+    let full_hours = full_runtime_hours(nominal_battery_v, battery_ah, load_w);
+    (full_hours * 60.0 * charge_pct.min(100) as f32 / 100.0).round() as u32
+}
+
+/// Hours a full battery of `battery_ah` lasts at a steady `load_w`.
+pub fn full_runtime_hours(nominal_battery_v: f32, battery_ah: f32, load_w: f32) -> f32 {
     if battery_ah <= 0.0 {
-        return 0;
+        return 0.0;
     }
     let amps = battery_amps(nominal_battery_v, load_w.max(MIN_LOAD_W));
-    let full_hours =
-        PEUKERT_RATED_HOURS * (battery_ah / (amps * PEUKERT_RATED_HOURS)).powf(PEUKERT_K);
-    (full_hours * 60.0 * charge_pct.min(100) as f32 / 100.0).round() as u32
+    PEUKERT_RATED_HOURS * (battery_ah / (amps * PEUKERT_RATED_HOURS)).powf(PEUKERT_K)
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -66,6 +66,8 @@ struct Summary {
     detail: String,
     status: Option<Status>,
     nominal: f32,
+    /// The service's counted charge (%) and capacity (Ah).
+    counted: Option<(f32, f32)>,
 }
 
 impl GuiApp {
@@ -114,13 +116,25 @@ fn mmss(secs: u64) -> String {
     format!("{}:{:02}", secs / 60, secs % 60)
 }
 
-/// Charge (%) and minutes left while running from the battery.
-fn on_battery_estimate(st: &Status, nominal: f32, cfg: &Config) -> (u32, u32) {
+/// Charge (%) and minutes left while running from the battery: from the
+/// service's count when there is one, else from the UPS's own reading.
+fn on_battery_estimate(
+    st: &Status,
+    nominal: f32,
+    cfg: &Config,
+    counted: Option<(f32, f32)>,
+) -> (u32, u32) {
     let load_w = diagram::watts(st.load_pct, cfg.ups_power_w) as f32;
-    let charge = st.charge_on_battery_pct(nominal, load_w);
+    let (charge, capacity) = match counted {
+        Some((charge, capacity)) => (charge.round() as u32, capacity),
+        None => (
+            st.charge_on_battery_pct(nominal, load_w),
+            cfg.battery_ah as f32,
+        ),
+    };
     (
         charge,
-        protocol::runtime_minutes(nominal, cfg.battery_ah as f32, charge, load_w),
+        protocol::runtime_minutes(nominal, capacity, charge, load_w),
     )
 }
 
@@ -140,6 +154,7 @@ fn summarize(v: &View, cfg: &Config) -> Summary {
         detail: String::new(),
         status: None,
         nominal: 24.0,
+        counted: None,
     };
     match &v.direct {
         Some(Ok((st, nominal))) => {
@@ -173,6 +188,7 @@ fn summarize(v: &View, cfg: &Config) -> Summary {
         return s;
     };
     s.nominal = snap.nominal_battery_v;
+    s.counted = snap.battery_charge_pct.zip(snap.battery_capacity_ah);
     let Some(st) = snap.status.clone().filter(|_| snap.connected) else {
         s.level = Level::Alarm;
         s.title = "ДБЖ не підключено".into();
@@ -207,7 +223,7 @@ fn summarize(v: &View, cfg: &Config) -> Summary {
             "Живлення від батареї".into()
         };
         let away = snap.on_battery_secs.unwrap_or(0) + elapsed;
-        let (charge, minutes) = on_battery_estimate(&st, s.nominal, cfg);
+        let (charge, minutes) = on_battery_estimate(&st, s.nominal, cfg, s.counted);
         let battery = format!("Заряд ~{charge} %, вистачить на {}.", runtime_text(minutes));
         s.detail = if snap.pc_shutdown_requested {
             "ПК вимикається.".into()
@@ -267,7 +283,8 @@ impl eframe::App for GuiApp {
                 st.load_pct, st.input_v
             );
             if st.on_battery() {
-                let (charge, minutes) = on_battery_estimate(st, summary.nominal, &self.saved);
+                let (charge, minutes) =
+                    on_battery_estimate(st, summary.nominal, &self.saved, summary.counted);
                 tooltip += &format!(
                     "\nзаряд ~{charge} %, вистачить на {}",
                     runtime_text(minutes)
@@ -395,18 +412,18 @@ impl GuiApp {
                 ui.columns(2, |cols| {
                     let (left, right) = cols.split_at_mut(1);
                     let (left, right) = (&mut left[0], &mut right[0]);
-                    self.diagram_card(left, ctx, view, st, summary.nominal);
+                    self.diagram_card(left, ctx, view, st, summary);
                     theme::card(left, "ІНДИКАТОРИ", |ui| {
                         diagram::indicators(ui, st)
                     });
-                    self.tiles(right, st, summary.nominal);
+                    self.tiles(right, st, summary);
                     self.controls(right, ctx, view, summary);
                 });
                 return;
             }
             Some(st) => {
-                self.diagram_card(ui, ctx, view, st, summary.nominal);
-                self.tiles(ui, st, summary.nominal);
+                self.diagram_card(ui, ctx, view, st, summary);
+                self.tiles(ui, st, summary);
                 theme::card(ui, "ІНДИКАТОРИ", |ui| diagram::indicators(ui, st));
             }
             None => {
@@ -424,10 +441,13 @@ impl GuiApp {
         ctx: &egui::Context,
         view: &View,
         st: &Status,
-        nominal: f32,
+        summary: &Summary,
     ) {
         theme::card(ui, "СХЕМА ЖИВЛЕННЯ", |ui| {
-            if diagram::show(ui, st, nominal, self.saved.ups_power_w) && crate::window_on_screen() {
+            let charge = summary.counted.map(|(charge, _)| charge.round() as u32);
+            if diagram::show(ui, st, summary.nominal, self.saved.ups_power_w, charge)
+                && crate::window_on_screen()
+            {
                 ctx.request_repaint_after(ANIMATION_FRAME);
             }
             if view.direct.is_some() {
@@ -516,10 +536,11 @@ impl GuiApp {
     }
 
     /// Battery, load and temperature as tiles with gauges.
-    fn tiles(&self, ui: &mut egui::Ui, st: &Status, nominal: f32) {
+    fn tiles(&self, ui: &mut egui::Ui, st: &Status, summary: &Summary) {
+        let nominal = summary.nominal;
         let volts = format!("{:.1} В", st.battery_v);
         let (battery_value, battery_fill, battery_note) = if st.on_battery() {
-            let (charge, minutes) = on_battery_estimate(st, nominal, &self.saved);
+            let (charge, minutes) = on_battery_estimate(st, nominal, &self.saved, summary.counted);
             (
                 format!("~{charge} %"),
                 charge as f32 / 100.0,
@@ -800,6 +821,10 @@ impl GuiApp {
     }
 
     fn settings_form(&mut self, ui: &mut egui::Ui) {
+        let learned = self
+            .snapshot_view()
+            .snapshot
+            .and_then(|snap| Some((snap.battery_capacity_ah?, snap.battery_learned_on?)));
         let f = &mut self.form;
         theme::card(ui, "ЗАХИСТ ПК", |ui| {
             ui.horizontal(|ui| {
@@ -893,6 +918,14 @@ impl GuiApp {
                 RichText::new("Ємність одного блоку з наклейки на батареї. У GU-1000PS зазвичай 2 × 12 В 7 А·год: вкажіть 7.")
                     .color(theme::WEAK),
             );
+            let note = match learned {
+                Some((ah, on)) => format!(
+                    "Реальна ємність за розрядом {on}: ≈{ah:.1} А·год, з неї рахується час роботи.                      Програма уточнює її щоразу, коли батарея розряджається до сигналу ДБЖ про низький заряд.                      Після заміни батареї змініть число вище, і уточнення почнеться заново."
+                ),
+                None => "Програма уточнить реальну ємність, коли батарея вперше розрядиться                          до сигналу ДБЖ про низький заряд."
+                    .into(),
+            };
+            ui.label(RichText::new(note).color(theme::WEAK));
             ui.horizontal(|ui| {
                 ui.label("Попереджати, коли температура ДБЖ досягне");
                 let mut temp = f.temp_alarm_c as f64;
