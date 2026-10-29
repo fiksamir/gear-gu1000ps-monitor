@@ -874,6 +874,33 @@ impl GuiApp {
                 )
                 .color(theme::WEAK),
             );
+            if self.saved.telegram_token.is_empty() {
+                ui.label(RichText::new("Як створити свого бота:").strong());
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("1. У Telegram відкрийте");
+                    if ui.link("@BotFather").clicked() {
+                        backend::open_url("https://t.me/BotFather");
+                    }
+                    ui.label("(офіційний бот Telegram із синьою позначкою) і натисніть «Start».");
+                });
+                for step in [
+                    "2. Надішліть йому /newbot.",
+                    "3. Введіть назву бота — будь-яку, наприклад «Мій ДБЖ».",
+                    "4. Введіть ім'я бота латиницею, яке закінчується на «bot», наприклад \
+                     my_home_ups_bot. Якщо його вже зайнято, BotFather попросить інше.",
+                    "5. BotFather надішле повідомлення з токеном — рядком виду 123456789:AAH…. \
+                     Скопіюйте токен, вставте в поле нижче й натисніть «Зберегти».",
+                    "6. Тут з'явиться шестизначний код. Відкрийте свого бота (посилання t.me/… є \
+                     в тому самому повідомленні BotFather), натисніть «Start» і надішліть код.",
+                ] {
+                    ui.label(step);
+                }
+                ui.label(
+                    RichText::new("Нікому не показуйте токен: з ним будь-хто може керувати ботом.")
+                        .color(theme::WEAK),
+                );
+                ui.add_space(4.0);
+            }
             ui.horizontal(|ui| {
                 ui.label("Токен бота");
                 ui.add(
@@ -883,16 +910,6 @@ impl GuiApp {
                         .desired_width(260.0),
                 );
             });
-            if self.saved.telegram_token.is_empty() {
-                ui.label(
-                    RichText::new(
-                        "Як отримати токен: у Telegram відкрийте @BotFather, надішліть /newbot, \
-                         придумайте назву та ім'я бота (наприкінці має бути «bot»). BotFather \
-                         надішле токен — вставте його сюди й натисніть «Зберегти».",
-                    )
-                    .color(theme::WEAK),
-                );
-            }
             let mut notify = self.saved.telegram_notify;
             let notify_changed = ui
                 .checkbox(
