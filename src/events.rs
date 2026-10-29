@@ -239,6 +239,23 @@ mod tests {
     }
 
     #[test]
+    fn picks_telegram_commands() {
+        let ev = parse(
+            "2026-10-29 15:20:01  команда з Telegram: запит стану\n\
+             2026-10-29 15:21:30  команда з Telegram: вимкнення ПК через 60 с\n\
+             2026-10-29 15:21:40  Telegram: зв'язок відновлено\n",
+        );
+        let got: Vec<(Kind, &str)> = ev.iter().map(|e| (e.kind, e.detail.as_str())).collect();
+        assert_eq!(
+            got,
+            [
+                (Kind::Remote, "запит стану"),
+                (Kind::Remote, "вимкнення ПК через 60 с")
+            ]
+        );
+    }
+
+    #[test]
     fn parses_times() {
         assert_eq!(parse_time("1970-01-01 00:00:00"), Some(0));
         assert_eq!(parse_time("2026-10-12 19:35:29"), Some(1791833729));

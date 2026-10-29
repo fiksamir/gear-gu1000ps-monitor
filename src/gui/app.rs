@@ -28,6 +28,8 @@ const ANIMATION_FRAME: Duration = Duration::from_millis(50);
 const REPO_URL: &str = "https://github.com/fiksamir/gear-gu1000ps-monitor";
 /// How long after a `--tray` start the window is hidden again if it shows.
 const START_HIDE_WINDOW: Duration = Duration::from_secs(5);
+/// Latest Telegram commands shown on the main tab.
+const TELEGRAM_FEED_LEN: usize = 5;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -221,6 +223,11 @@ fn summarize(v: &View, cfg: &Config) -> Summary {
         } else {
             format!("Без мережі {}. {battery}", mmss(away))
         };
+    } else if snap.pc_shutdown_requested {
+        // On mains only a command from Telegram powers the PC off.
+        s.level = Level::Warn;
+        s.title = "ПК вимикається".into();
+        s.detail = "Вимкнення за командою з Telegram. Скасувати: /cancel у чаті з ботом.".into();
     } else {
         s.level = Level::Ok;
         s.title = "Живлення від мережі".into();
@@ -401,6 +408,7 @@ impl GuiApp {
                     theme::card(left, "ІНДИКАТОРИ", |ui| {
                         diagram::indicators(ui, st)
                     });
+                    self.telegram_feed(left, view);
                     self.tiles(right, st, summary);
                     self.controls(right, ctx, view, summary);
                 });
@@ -410,6 +418,7 @@ impl GuiApp {
                 self.diagram_card(ui, ctx, view, st, summary);
                 self.tiles(ui, st, summary);
                 theme::card(ui, "ІНДИКАТОРИ", |ui| diagram::indicators(ui, st));
+                self.telegram_feed(ui, view);
             }
             None => {
                 theme::card(ui, "", |ui| {
@@ -418,6 +427,52 @@ impl GuiApp {
             }
         }
         self.controls(ui, ctx, view, summary);
+    }
+
+    /// The bot's state and its latest commands, picked out of the service log.
+    fn telegram_feed(&self, ui: &mut egui::Ui, view: &View) {
+        let recent: Vec<&events::Event> = view
+            .events
+            .iter()
+            .rev()
+            .filter(|e| e.kind == EventKind::Remote)
+            .take(TELEGRAM_FEED_LEN)
+            .collect();
+        if self.saved.telegram_token.is_empty() && recent.is_empty() {
+            return;
+        }
+        let state = view.snapshot.as_ref().and_then(|s| s.telegram.clone());
+        let today = gear_ups::winutil::now_string()[..10].to_string();
+        theme::card(ui, "TELEGRAM", |ui| {
+            let (text, color) = match state {
+                Some(BotState::Linked { who, .. }) => {
+                    (format!("Прив'язано: {who}"), Level::Ok.color())
+                }
+                Some(BotState::Pairing { .. }) => (
+                    "Чекає на код прив'язки (вкладка «Налаштування»)".into(),
+                    Level::Warn.color(),
+                ),
+                Some(BotState::Connecting) => ("Підключення…".into(), Level::Warn.color()),
+                Some(BotState::Error { message }) => (message, Level::Alarm.color()),
+                Some(BotState::Off) | None => ("Бот вимкнено".into(), Level::Off.color()),
+            };
+            theme::lamp(ui, &text, true, color);
+            if recent.is_empty() {
+                ui.label(RichText::new("Команд ще не було.").color(theme::WEAK));
+            }
+            for e in recent {
+                // "HH:MM" today, "DD.MM HH:MM" before.
+                let when = if e.time[..10] == today {
+                    e.time[11..16].to_string()
+                } else {
+                    format!("{}.{} {}", &e.time[8..10], &e.time[5..7], &e.time[11..16])
+                };
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(when).monospace().color(theme::WEAK));
+                    ui.label(&e.detail);
+                });
+            }
+        });
     }
 
     fn diagram_card(

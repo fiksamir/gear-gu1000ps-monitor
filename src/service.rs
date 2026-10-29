@@ -595,9 +595,14 @@ impl Monitor {
                     self.notify(Note::reply(text));
                     self.publish();
                 }
-                Ok(false) => self.notify(Note::reply("Вимкнення ПК не заплановано.")),
+                Ok(false) => {
+                    log("команда з Telegram: скасування, але вимкнення не заплановано");
+                    self.notify(Note::reply("Вимкнення ПК не заплановано."));
+                }
                 Err(e) => {
-                    log(&format!("скасувати вимкнення ПК не вдалося: {e}"));
+                    log(&format!(
+                        "команда з Telegram: скасувати вимкнення ПК не вдалося: {e}"
+                    ));
                     self.notify(Note::reply(format!("Не вдалося скасувати вимкнення: {e}")));
                 }
             },

@@ -496,13 +496,24 @@ impl Bot {
         if chat != linked {
             return;
         }
+        // Commands go to the log as "команда з Telegram: …", which the
+        // window shows on its main tab.
         match command.as_str() {
-            "/status" => self.send(chat, &status_text(), None),
-            "/shutdown" => self.confirm(chat, Action::Shutdown),
-            "/hibernate" => self.confirm(chat, Action::Hibernate),
+            "/status" => {
+                log("команда з Telegram: запит стану");
+                self.send(chat, &status_text(), None);
+            }
+            "/shutdown" => {
+                log("команда з Telegram: запит на вимкнення ПК, чекаю підтвердження");
+                self.confirm(chat, Action::Shutdown);
+            }
+            "/hibernate" => {
+                log("команда з Telegram: запит на гібернацію, чекаю підтвердження");
+                self.confirm(chat, Action::Hibernate);
+            }
             "/cancel" => on_command(Remote::Cancel),
             "/unlink" => {
-                log(&format!("Telegram: чат {} відв'язано", self.link.who));
+                log(&format!("команда з Telegram: чат {} відв'язано", self.link.who));
                 self.link.chat_id = None;
                 self.link.who.clear();
                 self.link.save();
@@ -597,7 +608,10 @@ impl Bot {
             .take_if(|p| p.nonce == nonce && p.at.elapsed() < CONFIRM_FOR);
         match (verb, pending) {
             ("cancel", _) => on_command(Remote::Cancel),
-            ("no", _) => self.edit(chat, message_id, "Добре, нічого не роблю.", None),
+            ("no", _) => {
+                log("команда з Telegram: не підтверджено, нічого не зроблено");
+                self.edit(chat, message_id, "Добре, нічого не роблю.", None);
+            }
             ("yes", Some(p)) if p.action == Action::Shutdown => {
                 self.edit(
                     chat,
@@ -616,12 +630,15 @@ impl Bot {
                     self.send(chat, &format!("Не вдалося: {e}"), None);
                 }
             }
-            _ => self.edit(
-                chat,
-                message_id,
-                "Запит застарів. Надішліть команду ще раз.",
-                None,
-            ),
+            _ => {
+                log("команда з Telegram: підтвердження застаріло");
+                self.edit(
+                    chat,
+                    message_id,
+                    "Запит застарів. Надішліть команду ще раз.",
+                    None,
+                );
+            }
         }
     }
 }
