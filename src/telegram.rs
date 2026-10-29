@@ -316,13 +316,27 @@ fn poll_loop(state: Arc<Mutex<BotState>>, target: Target, on_command: impl Fn(Re
     let mut bot: Option<Bot> = None;
     let mut failures = 0u32;
     let mut reported: Option<String> = None;
+    let mut empty_reads = 0u32;
     loop {
-        let token = Config::read()
-            .ok()
-            .flatten()
-            .map(|c| c.telegram_token.0)
-            .unwrap_or_default();
+        let token = match Config::read() {
+            Ok(cfg) => cfg.unwrap_or_default().telegram_token.0,
+            // Broken: the service runs on as it was, and so does the bot.
+            Err(_) => match &bot {
+                Some(b) => b.token.clone(),
+                None => {
+                    thread::sleep(Duration::from_secs(5));
+                    continue;
+                }
+            },
+        };
         if token.is_empty() {
+            // config.toml is rewritten in place, so a read can catch it
+            // empty; only a second empty read in a row turns the bot off.
+            empty_reads += 1;
+            if empty_reads < 2 {
+                thread::sleep(Duration::from_secs(1));
+                continue;
+            }
             if bot.take().is_some() {
                 log("Telegram: бота вимкнено в налаштуваннях");
             }
@@ -334,6 +348,7 @@ fn poll_loop(state: Arc<Mutex<BotState>>, target: Target, on_command: impl Fn(Re
             thread::sleep(Duration::from_secs(5));
             continue;
         }
+        empty_reads = 0;
         if bot.as_ref().is_none_or(|b| b.token != token) {
             if bot.is_none() {
                 set_state(BotState::Connecting);
@@ -350,6 +365,9 @@ fn poll_loop(state: Arc<Mutex<BotState>>, target: Target, on_command: impl Fn(Re
             failures = 0;
         }
         let Some(b) = bot.as_mut() else { continue };
+        // Before the first request gets through (no internet after boot),
+        // so notifications queue up instead of being dropped.
+        set_target(b.link.chat_id.map(|c| (b.token.clone(), c)));
 
         match b.step(&on_command) {
             Ok(()) => {

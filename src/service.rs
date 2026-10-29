@@ -39,6 +39,9 @@ const HYBRID_EVENT_WAIT: Duration = Duration::from_millis(1500);
 /// How long after start or resume the service waits before restoring the
 /// beeper state (see `restore_beeper`).
 const BEEPER_RESTORE_DELAY: Duration = Duration::from_secs(300);
+/// Still running this long after asking Windows to power off means the
+/// shutdown was aborted elsewhere (`shutdown /a`) or blocked.
+const SHUTDOWN_STUCK_AFTER: Duration = Duration::from_secs(180);
 
 /// What wakes the main loop besides the poll timer.
 enum Signal {
@@ -124,9 +127,9 @@ fn run_service() -> windows_service::Result<()> {
 
     let mut next_poll = Instant::now();
     loop {
-        if Instant::now() < next_poll {
-            // Woken early by a command from Telegram.
-        } else if let Ok(mut m) = monitor.lock() {
+        // Not due yet when woken early by a command from Telegram.
+        let due = Instant::now() >= next_poll;
+        if let Some(mut m) = due.then(|| monitor.lock().ok()).flatten() {
             let modified = config::modified();
             if modified != cfg_modified {
                 cfg_modified = modified;
@@ -149,6 +152,8 @@ fn run_service() -> windows_service::Result<()> {
                 }
             }
             m.poll();
+        }
+        if due {
             next_poll = Instant::now() + poll_interval;
         }
         match signal_rx.recv_timeout(next_poll.saturating_duration_since(Instant::now())) {
@@ -178,6 +183,7 @@ struct Monitor {
     /// Charge counted from the load, and the capacity learned from discharges.
     gauge: Gauge,
     pc_shutdown_requested: bool,
+    pc_shutdown_at: Instant,
     ups_off_sent: bool,
     /// Last raw Q1 reply and when it last changed: the USB bridge can hang
     /// and keep answering with the same stale line.
@@ -211,6 +217,7 @@ impl Monitor {
             on_battery_since: None,
             gauge: Gauge::load(),
             pc_shutdown_requested: false,
+            pc_shutdown_at: Instant::now(),
             ups_off_sent: false,
             last_raw: None,
             archiver: history::Archiver::default(),
@@ -335,7 +342,16 @@ impl Monitor {
         }
     }
 
+    fn shutdown_started(&mut self) {
+        self.pc_shutdown_requested = true;
+        self.pc_shutdown_at = Instant::now();
+    }
+
     fn poll(&mut self) {
+        if self.pc_shutdown_requested && self.pc_shutdown_at.elapsed() >= SHUTDOWN_STUCK_AFTER {
+            log("вимкнення ПК не відбулося, служба знову стежить за живленням");
+            self.pc_shutdown_requested = false;
+        }
         if let Some(s) = self.query() {
             // Only fresh readings go to the history; publish() also runs
             // from on_power_down with the last known status.
@@ -463,7 +479,7 @@ impl Monitor {
                     &format!("ДБЖ GEAR: {why}. Комп'ютер буде вимкнено."),
                     grace,
                 ) {
-                    Ok(()) => self.pc_shutdown_requested = true,
+                    Ok(()) => self.shutdown_started(),
                     Err(e) => log(&format!("InitiateShutdown не вдався: {e}")),
                 }
             }
@@ -552,7 +568,7 @@ impl Monitor {
                     telegram::SHUTDOWN_GRACE_SECS,
                 ) {
                     Ok(()) => {
-                        self.pc_shutdown_requested = true;
+                        self.shutdown_started();
                         self.publish();
                     }
                     Err(e) => {
