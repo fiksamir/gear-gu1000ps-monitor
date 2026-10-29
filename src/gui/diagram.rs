@@ -71,10 +71,7 @@ pub fn flow(s: &Status) -> Flow {
     }
 }
 
-/// Load in watts from the percentage and the UPS's rated active power.
-pub fn watts(load_pct: u32, ups_power_w: u32) -> u32 {
-    ((load_pct as f32 / 100.0) * ups_power_w as f32).round() as u32
-}
+pub use gear_ups::protocol::watts;
 
 struct Palette {
     idle: Color32,

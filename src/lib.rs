@@ -9,4 +9,5 @@ pub mod icon;
 pub mod protocol;
 pub mod service;
 pub mod snapshot;
+pub mod telegram;
 pub mod winutil;

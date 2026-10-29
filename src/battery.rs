@@ -11,8 +11,41 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::{full_runtime_hours, PEUKERT_K};
+use crate::protocol::{self, full_runtime_hours, Status, PEUKERT_K};
 use crate::winutil::data_dir;
+
+/// Charge (%) and minutes left while running from the battery: from the
+/// service's count (`counted` = charge %, capacity Ah) when there is one,
+/// else from the UPS's own reading.
+pub fn estimate(
+    st: &Status,
+    nominal_battery_v: f32,
+    ups_power_w: u32,
+    configured_ah: f32,
+    counted: Option<(f32, f32)>,
+) -> (u32, u32) {
+    let load_w = protocol::watts(st.load_pct, ups_power_w) as f32;
+    let (charge, capacity) = match counted {
+        Some((charge, capacity)) => (charge.round() as u32, capacity),
+        None => (
+            st.charge_on_battery_pct(nominal_battery_v, load_w),
+            configured_ah,
+        ),
+    };
+    (
+        charge,
+        protocol::runtime_minutes(nominal_battery_v, capacity, charge, load_w),
+    )
+}
+
+pub fn runtime_text(minutes: u32) -> String {
+    match minutes {
+        0 => "менше хвилини".into(),
+        180.. => "понад 3 год".into(),
+        60.. => format!("~{} год {} хв", minutes / 60, minutes % 60),
+        _ => format!("~{minutes} хв"),
+    }
+}
 
 /// What the charger puts back per hour on mains: a small UPS charger gives
 /// about 1 A, of which some 80 % ends up stored. Counted as a straight line.

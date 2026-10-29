@@ -13,12 +13,14 @@ use windows_service::service::{
 use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
 use windows_service::{define_windows_service, service_dispatcher};
 
-use crate::battery::Gauge;
+use crate::battery::{self, Gauge};
 use crate::config::{self, Config};
+use crate::events;
 use crate::hid::Ups;
 use crate::history;
 use crate::protocol::{self, Ratings, Status};
 use crate::snapshot::{self, Snapshot};
+use crate::telegram::{self, Note, Remote};
 use crate::winutil::{self, log, ShutdownKind};
 
 pub const SERVICE_NAME: &str = "GearUps";
@@ -38,6 +40,12 @@ const HYBRID_EVENT_WAIT: Duration = Duration::from_millis(1500);
 /// beeper state (see `restore_beeper`).
 const BEEPER_RESTORE_DELAY: Duration = Duration::from_secs(300);
 
+/// What wakes the main loop besides the poll timer.
+enum Signal {
+    Stop,
+    Remote(Remote),
+}
+
 define_windows_service!(ffi_service_main, service_main);
 
 pub fn run() -> windows_service::Result<()> {
@@ -56,20 +64,26 @@ fn run_service() -> windows_service::Result<()> {
     history::backfill_archive(snapshot::unix_now());
     let mut poll_interval = Duration::from_secs(cfg.poll_interval_secs);
     let mut cfg_modified = config::modified();
-    let monitor = Arc::new(Mutex::new(Monitor::new(cfg)));
-    let (stop_tx, stop_rx) = mpsc::channel::<()>();
+    let (signal_tx, signal_rx) = mpsc::channel::<Signal>();
+    let bot = {
+        let tx = signal_tx.clone();
+        telegram::spawn(move |r| {
+            let _ = tx.send(Signal::Remote(r));
+        })
+    };
+    let monitor = Arc::new(Mutex::new(Monitor::new(cfg, bot)));
 
     let handler_monitor = Arc::clone(&monitor);
     let status_handle = service_control_handler::register(SERVICE_NAME, move |ctrl| match ctrl {
         ServiceControl::Stop => {
-            let _ = stop_tx.send(());
+            let _ = signal_tx.send(Signal::Stop);
             ServiceControlHandlerResult::NoError
         }
         ServiceControl::Preshutdown => {
             if let Ok(mut m) = handler_monitor.lock() {
                 m.on_power_down("завершення роботи", PRESHUTDOWN_EVENT_WINDOW_SECS, false);
             }
-            let _ = stop_tx.send(());
+            let _ = signal_tx.send(Signal::Stop);
             ServiceControlHandlerResult::NoError
         }
         ServiceControl::PowerEvent(param) => {
@@ -108,8 +122,11 @@ fn run_service() -> windows_service::Result<()> {
             | ServiceControlAccept::POWER_EVENT,
     )?;
 
+    let mut next_poll = Instant::now();
     loop {
-        if let Ok(mut m) = monitor.lock() {
+        if Instant::now() < next_poll {
+            // Woken early by a command from Telegram.
+        } else if let Ok(mut m) = monitor.lock() {
             let modified = config::modified();
             if modified != cfg_modified {
                 cfg_modified = modified;
@@ -132,9 +149,15 @@ fn run_service() -> windows_service::Result<()> {
                 }
             }
             m.poll();
+            next_poll = Instant::now() + poll_interval;
         }
-        match stop_rx.recv_timeout(poll_interval) {
-            Err(RecvTimeoutError::Timeout) => continue,
+        match signal_rx.recv_timeout(next_poll.saturating_duration_since(Instant::now())) {
+            Err(RecvTimeoutError::Timeout) => {}
+            Ok(Signal::Remote(r)) => {
+                if let Ok(mut m) = monitor.lock() {
+                    m.remote(r);
+                }
+            }
             _ => break,
         }
     }
@@ -167,6 +190,10 @@ struct Monitor {
     /// whether the one try for this start or resume is used up.
     beeper_not_before: Instant,
     beeper_tried: bool,
+    bot: telegram::Handle,
+    /// The outage shutdown was cancelled from Telegram: not again until
+    /// mains returns (a low battery still shuts down).
+    timeout_cancelled: bool,
 }
 
 /// Mains voltage and load jitter every few seconds, so a Q1 line that stays
@@ -174,7 +201,7 @@ struct Monitor {
 const FROZEN_AFTER: Duration = Duration::from_secs(10 * 60);
 
 impl Monitor {
-    fn new(cfg: Config) -> Monitor {
+    fn new(cfg: Config, bot: telegram::Handle) -> Monitor {
         Monitor {
             cfg,
             ups: None,
@@ -192,7 +219,13 @@ impl Monitor {
             hot: false,
             beeper_not_before: Instant::now() + BEEPER_RESTORE_DELAY,
             beeper_tried: false,
+            bot,
+            timeout_cancelled: false,
         }
+    }
+
+    fn notify(&self, note: Note) {
+        let _ = self.bot.notes.send(note);
     }
 
     fn connect(&mut self) -> bool {
@@ -261,6 +294,7 @@ impl Monitor {
         if self.last_raw.as_ref() != Some(&raw) {
             if self.frozen {
                 log("дані від ДБЖ знову оновлюються");
+                self.notify(Note::new("Дані від ДБЖ знову оновлюються."));
                 self.frozen = false;
             }
             self.last_raw = Some(raw);
@@ -270,6 +304,10 @@ impl Monitor {
                 "дані від ДБЖ не оновлюються вже {} хв (USB-контролер ДБЖ завис): \
                  від'єднайте USB-кабель ДБЖ на 10 с",
                 FROZEN_AFTER.as_secs() / 60
+            ));
+            self.notify(Note::new(
+                "⚠ Дані від ДБЖ не оновлюються: USB-контролер ДБЖ завис, і зникнення мережі \
+                 не буде помічено. Від'єднайте USB-кабель ДБЖ на 10 с.",
             ));
             self.frozen = true;
         }
@@ -333,16 +371,35 @@ impl Monitor {
                         },
                         describe(&s, self.nominal_battery_v)
                     ));
+                    if s.on_battery() {
+                        self.notify_power_lost(&s);
+                    } else {
+                        let away = self.on_battery_since.map(|t| t.elapsed().as_secs());
+                        self.notify(Note::new(match away {
+                            Some(secs) => format!(
+                                "✅ Мережу відновлено. Світла не було {}.",
+                                events::duration_text(secs as i64)
+                            ),
+                            None => "✅ Мережу відновлено.".into(),
+                        }));
+                    }
                 }
                 if s.battery_low() && !p.battery_low() {
                     log("низький заряд батареї");
+                    // With the shutdown below the PC goes off at once; that
+                    // message is sent before it.
+                    if !(s.on_battery() && self.cfg.shutdown_on_battery_low) {
+                        self.notify(Note::new("🪫 Низький заряд батареї ДБЖ."));
+                    }
                 }
                 if s.ups_failed() != p.ups_failed() {
-                    log(if s.ups_failed() {
+                    let text = if s.ups_failed() {
                         "ДБЖ повідомляє про несправність"
                     } else {
                         "несправність ДБЖ зникла"
-                    });
+                    };
+                    log(text);
+                    self.notify(Note::new(format!("⚠ {text}.")));
                 }
             }
         }
@@ -353,9 +410,17 @@ impl Monitor {
                 "ДБЖ гарячий: {:.0} °C (поріг {limit:.0} °C)",
                 s.temp_c
             ));
+            self.notify(Note::new(format!(
+                "🌡 ДБЖ перегрівається: {:.0} °C. Перевірте кулер і вентиляцію.",
+                s.temp_c
+            )));
             self.hot = true;
         } else if self.hot && (limit == 0.0 || s.temp_c <= limit - 3.0) {
             log(&format!("температура ДБЖ знизилась до {:.0} °C", s.temp_c));
+            self.notify(Note::new(format!(
+                "Температура ДБЖ знизилась до {:.0} °C.",
+                s.temp_c
+            )));
             self.hot = false;
         }
 
@@ -364,7 +429,9 @@ impl Monitor {
         if s.on_battery() {
             let since = *self.on_battery_since.get_or_insert_with(Instant::now);
             let limit = self.cfg.on_battery_shutdown_secs;
-            let timed_out = limit > 0 && since.elapsed() >= Duration::from_secs(limit);
+            let timed_out = !self.timeout_cancelled
+                && limit > 0
+                && since.elapsed() >= Duration::from_secs(limit);
             let low = self.cfg.shutdown_on_battery_low && s.battery_low();
             if (timed_out || low) && !self.pc_shutdown_requested {
                 let why = if low {
@@ -376,6 +443,22 @@ impl Monitor {
                 // A low battery leaves well under a minute (28.10: power was
                 // cut 55 s after the flag), so shut down without a countdown.
                 let grace = if low { 0 } else { 60 };
+                if low {
+                    // Give the message a few seconds to leave before the PC goes off.
+                    let (done, sent) = mpsc::channel();
+                    self.notify(
+                        Note::new("🪫 Низький заряд батареї: вимикаю ПК.").signal_when_done(done),
+                    );
+                    let _ = sent.recv_timeout(Duration::from_secs(5));
+                } else {
+                    self.notify(
+                        Note::new(format!(
+                            "⏻ Мережі немає {}: ПК вимкнеться через {grace} с.",
+                            events::duration_text(limit as i64)
+                        ))
+                        .with_cancel_button(),
+                    );
+                }
                 match winutil::shutdown_pc(
                     &format!("ДБЖ GEAR: {why}. Комп'ютер буде вимкнено."),
                     grace,
@@ -386,6 +469,7 @@ impl Monitor {
             }
         } else {
             self.on_battery_since = None;
+            self.timeout_cancelled = false;
         }
 
         self.last = Some(s);
@@ -427,6 +511,83 @@ impl Monitor {
         }
     }
 
+    fn notify_power_lost(&self, s: &Status) {
+        let capacity = self.gauge.capacity(self.cfg.battery_ah as f32);
+        let counted = Some((self.gauge.charge_pct(snapshot::unix_now(), capacity), capacity));
+        let (charge, minutes) = battery::estimate(
+            s,
+            self.nominal_battery_v,
+            self.cfg.ups_power_w,
+            self.cfg.battery_ah as f32,
+            counted,
+        );
+        let mut text = format!(
+            "⚡ Зникла мережа. ПК працює від батареї: заряд ~{charge} %, вистачить на {}.",
+            battery::runtime_text(minutes)
+        );
+        let limit = self.cfg.on_battery_shutdown_secs;
+        if limit > 0 {
+            text += &format!(
+                " ПК вимкнеться через {}.",
+                events::duration_text(limit as i64)
+            );
+        }
+        self.notify(Note::new(text));
+    }
+
+    /// A command confirmed in Telegram.
+    fn remote(&mut self, r: Remote) {
+        match r {
+            Remote::Shutdown => {
+                if self.pc_shutdown_requested {
+                    self.notify(Note::reply("ПК уже вимикається."));
+                    return;
+                }
+                log(&format!(
+                    "команда з Telegram: вимкнення ПК через {} с",
+                    telegram::SHUTDOWN_GRACE_SECS
+                ));
+                match winutil::shutdown_pc(
+                    "Команда з Telegram: комп'ютер буде вимкнено.",
+                    telegram::SHUTDOWN_GRACE_SECS,
+                ) {
+                    Ok(()) => {
+                        self.pc_shutdown_requested = true;
+                        self.publish();
+                    }
+                    Err(e) => {
+                        log(&format!("InitiateShutdown не вдався: {e}"));
+                        self.notify(Note::reply(format!("Не вдалося вимкнути ПК: {e}")));
+                    }
+                }
+            }
+            Remote::Cancel => match winutil::abort_shutdown() {
+                Ok(true) => {
+                    log("команда з Telegram: вимкнення ПК скасовано");
+                    self.pc_shutdown_requested = false;
+                    let limit = self.cfg.on_battery_shutdown_secs;
+                    let past_limit = self
+                        .on_battery_since
+                        .is_some_and(|t| limit > 0 && t.elapsed().as_secs() >= limit);
+                    let mut text = String::from("Вимкнення ПК скасовано.");
+                    if past_limit {
+                        // Otherwise the next poll would start it again.
+                        self.timeout_cancelled = true;
+                        text += " Через відсутність мережі ПК більше не вимикатиметься, \
+                                 доки її не відновлять; при низькому заряді вимкнеться однаково.";
+                    }
+                    self.notify(Note::reply(text));
+                    self.publish();
+                }
+                Ok(false) => self.notify(Note::reply("Вимкнення ПК не заплановано.")),
+                Err(e) => {
+                    log(&format!("скасувати вимкнення ПК не вдалося: {e}"));
+                    self.notify(Note::reply(format!("Не вдалося скасувати вимкнення: {e}")));
+                }
+            },
+        }
+    }
+
     fn publish(&self) {
         let connected = self.ups.is_some();
         let status = if connected { self.last.clone() } else { None };
@@ -437,7 +598,7 @@ impl Monitor {
             .map(|t| t.elapsed().as_secs());
         let limit = self.cfg.on_battery_shutdown_secs;
         let pc_shutdown_in_secs = on_battery_secs
-            .filter(|_| limit > 0 && !self.pc_shutdown_requested)
+            .filter(|_| limit > 0 && !self.pc_shutdown_requested && !self.timeout_cancelled)
             .map(|secs| limit.saturating_sub(secs));
         let capacity = self.gauge.capacity(self.cfg.battery_ah as f32);
         snapshot::write(&Snapshot {
@@ -460,6 +621,7 @@ impl Monitor {
             battery_charge_pct: Some(self.gauge.charge_pct(snapshot::unix_now(), capacity)),
             battery_capacity_ah: Some(capacity),
             battery_learned_on: self.gauge.learned_on.clone(),
+            telegram: Some(self.bot.state()),
         });
     }
 

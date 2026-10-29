@@ -5,7 +5,9 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::ptr::{null, null_mut};
 
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LUID, SYSTEMTIME};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, ERROR_NO_SHUTDOWN_IN_PROGRESS, HANDLE, LUID, SYSTEMTIME,
+};
 use windows_sys::Win32::Security::{
     AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED,
     TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
@@ -17,8 +19,9 @@ use windows_sys::Win32::System::EventLog::{
 use windows_sys::Win32::System::Registry::{
     RegCloseKey, RegOpenKeyExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ,
 };
+use windows_sys::Win32::System::Power::{IsPwrHibernateAllowed, SetSuspendState};
 use windows_sys::Win32::System::Shutdown::{
-    InitiateShutdownW, SHTDN_REASON_FLAG_PLANNED, SHTDN_REASON_MAJOR_POWER,
+    AbortSystemShutdownW, InitiateShutdownW, SHTDN_REASON_FLAG_PLANNED, SHTDN_REASON_MAJOR_POWER,
     SHTDN_REASON_MINOR_ENVIRONMENT, SHUTDOWN_FORCE_OTHERS, SHUTDOWN_POWEROFF,
 };
 use windows_sys::Win32::System::SystemInformation::GetLocalTime;
@@ -325,6 +328,35 @@ pub fn shutdown_pc(message: &str, grace_secs: u32) -> io::Result<()> {
     } else {
         Err(io::Error::from_raw_os_error(rc as i32))
     }
+}
+
+/// Stops a shutdown started by `shutdown_pc` while its countdown runs.
+/// `Ok(false)`: there was none to stop.
+pub fn abort_shutdown() -> io::Result<bool> {
+    enable_shutdown_privilege()?;
+    if unsafe { AbortSystemShutdownW(null()) } != 0 {
+        return Ok(true);
+    }
+    let e = io::Error::last_os_error();
+    if e.raw_os_error() == Some(ERROR_NO_SHUTDOWN_IN_PROGRESS as i32) {
+        Ok(false)
+    } else {
+        Err(e)
+    }
+}
+
+/// Hibernates the PC; returns after it wakes up again.
+pub fn hibernate() -> io::Result<()> {
+    if unsafe { IsPwrHibernateAllowed() } == 0 {
+        return Err(io::Error::other(
+            "гібернацію в Windows вимкнено (увімкнути: powercfg /hibernate on)",
+        ));
+    }
+    enable_shutdown_privilege()?;
+    if unsafe { SetSuspendState(1, 0, 0) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

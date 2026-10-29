@@ -2,6 +2,7 @@
 name = "gear-ups"
 version = "0.4.1"
 edition = "2021"
+authors = ["Denys Yevdokymenko"]
 license = "MIT"
 description = "Monitor and power-off helper for GEAR GU-1000PS (MEC0003, Megatec over USB HID)"
 
@@ -25,6 +26,7 @@ windows-service = "0.7"
 eframe = "0.36"
 tray-icon = "0.26"
 egui_plot = "0.37"
+ureq = { version = "3.5.0", default-features = false, features = ["native-tls-no-default", "json"] }
 
 [dependencies.windows-sys]
 version = "0.59"
@@ -35,6 +37,7 @@ features = [
     "Win32_Devices_DeviceAndDriverInstallation",
     "Win32_Storage_FileSystem",
     "Win32_System_EventLog",
+    "Win32_System_Power",
     "Win32_System_Shutdown",
     "Win32_System_Registry",
     "Win32_System_SystemInformation",

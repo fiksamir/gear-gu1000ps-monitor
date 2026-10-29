@@ -15,6 +15,7 @@ pub enum Kind {
     Unfrozen,
     Fault,
     FaultGone,
+    Remote,
 }
 
 impl Kind {
@@ -88,6 +89,7 @@ const RULES: &[(&str, Kind, &str)] = &[
         Kind::FaultGone,
         "Несправність ДБЖ зникла",
     ),
+    ("команда з Telegram", Kind::Remote, "Команда з Telegram"),
 ];
 
 fn rule(text: &str) -> Option<&'static (&'static str, Kind, &'static str)> {

@@ -176,6 +176,11 @@ fn battery_amps(nominal_battery_v: f32, load_w: f32) -> f32 {
     load_w.max(0.0) / (INVERTER_EFFICIENCY * nominal_battery_v.max(1.0))
 }
 
+/// Load in watts from the percentage and the UPS's rated active power.
+pub fn watts(load_pct: u32, ups_power_w: u32) -> u32 {
+    ((load_pct as f32 / 100.0) * ups_power_w as f32).round() as u32
+}
+
 /// Rough minutes the battery lasts at `load_w` from `charge_pct`, by
 /// Peukert's law: big loads get less out of a lead-acid battery than its
 /// rated ampere-hours.

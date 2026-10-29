@@ -39,6 +39,27 @@ pub struct Config {
     /// the PC is off), so the service sets it again. Unset: left alone.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub beeper_on: Option<bool>,
+    /// Telegram bot token from @BotFather (empty = no bot).
+    pub telegram_token: Secret,
+    /// Send power cuts, low battery etc. to the linked Telegram chat.
+    pub telegram_notify: bool,
+}
+
+/// A value kept out of the log: `Config` is logged with `{:?}`.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Secret(pub String);
+
+impl Secret {
+    pub fn is_empty(&self) -> bool {
+        self.0.trim().is_empty()
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.is_empty() { "\"\"" } else { "\"***\"" })
+    }
 }
 
 impl Default for Config {
@@ -55,6 +76,8 @@ impl Default for Config {
             battery_ah: 7.0,
             temp_alarm_c: 55,
             beeper_on: None,
+            telegram_token: Secret::default(),
+            telegram_notify: true,
         }
     }
 }
@@ -112,6 +135,7 @@ impl Config {
         self.ups_power_w = self.ups_power_w.clamp(100, 10_000);
         self.battery_ah = self.battery_ah.clamp(1.0, 500.0);
         self.temp_alarm_c = self.temp_alarm_c.min(90);
+        self.telegram_token.0 = self.telegram_token.0.trim().to_string();
         self
     }
 }

@@ -8,6 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::Status;
+use crate::telegram::BotState;
 use crate::winutil::data_dir;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -41,6 +42,8 @@ pub struct Snapshot {
     /// Date of the discharge the capacity was learned from.
     #[serde(default)]
     pub battery_learned_on: Option<String>,
+    #[serde(default)]
+    pub telegram: Option<BotState>,
 }
 
 pub fn path() -> PathBuf {

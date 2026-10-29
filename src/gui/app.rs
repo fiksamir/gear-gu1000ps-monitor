@@ -6,10 +6,12 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, RichText};
 
-use gear_ups::config::Config;
+use gear_ups::battery::{self, runtime_text};
+use gear_ups::config::{Config, Secret};
 use gear_ups::events::{self, Kind as EventKind};
 use gear_ups::protocol::{self, Status};
 use gear_ups::snapshot;
+use gear_ups::telegram::BotState;
 
 use crate::backend::{self, Outcome, SvcState, View};
 use crate::chart::{self, Period};
@@ -54,6 +56,9 @@ pub struct GuiApp {
     form: Config,
     settings_msg: Option<Result<String, String>>,
     beeper_outcome: Outcome,
+    /// Token typed into the Telegram card, saved by its own button.
+    tg_token: String,
+    tg_msg: Option<Result<String, String>>,
     /// The result message on screen and when it first appeared.
     outcome_since: Option<(Result<String, String>, Instant)>,
     show_about: bool,
@@ -98,6 +103,8 @@ impl GuiApp {
             outcome: Outcome::default(),
             confirm_test: false,
             form: saved.clone(),
+            tg_token: saved.telegram_token.0.clone(),
+            tg_msg: None,
             saved,
             settings_msg,
             beeper_outcome: Outcome::default(),
@@ -116,35 +123,13 @@ fn mmss(secs: u64) -> String {
     format!("{}:{:02}", secs / 60, secs % 60)
 }
 
-/// Charge (%) and minutes left while running from the battery: from the
-/// service's count when there is one, else from the UPS's own reading.
 fn on_battery_estimate(
     st: &Status,
     nominal: f32,
     cfg: &Config,
     counted: Option<(f32, f32)>,
 ) -> (u32, u32) {
-    let load_w = diagram::watts(st.load_pct, cfg.ups_power_w) as f32;
-    let (charge, capacity) = match counted {
-        Some((charge, capacity)) => (charge.round() as u32, capacity),
-        None => (
-            st.charge_on_battery_pct(nominal, load_w),
-            cfg.battery_ah as f32,
-        ),
-    };
-    (
-        charge,
-        protocol::runtime_minutes(nominal, capacity, charge, load_w),
-    )
-}
-
-fn runtime_text(minutes: u32) -> String {
-    match minutes {
-        0 => "менше хвилини".into(),
-        180.. => "понад 3 год".into(),
-        60.. => format!("~{} год {} хв", minutes / 60, minutes % 60),
-        _ => format!("~{minutes} хв"),
-    }
+    battery::estimate(st, nominal, cfg.ups_power_w, cfg.battery_ah as f32, counted)
 }
 
 fn summarize(v: &View, cfg: &Config) -> Summary {
@@ -764,10 +749,12 @@ impl GuiApp {
                         let (left, right) = cols.split_at_mut(1);
                         self.settings_form(&mut left[0]);
                         self.beeper_card(&mut right[0], ctx, status);
+                        self.telegram_card(&mut right[0]);
                     });
                 } else {
                     self.settings_form(ui);
                     self.beeper_card(ui, ctx, status);
+                    self.telegram_card(ui);
                 }
             });
     }
@@ -809,6 +796,145 @@ impl GuiApp {
                 .color(theme::WEAK),
             );
             match &result {
+                Some(Ok(m)) => {
+                    ui.label(RichText::new(m).color(Level::Ok.color()));
+                }
+                Some(Err(e)) => {
+                    ui.label(RichText::new(e).color(Level::Alarm.color()));
+                }
+                None => {}
+            }
+        });
+    }
+
+    /// The bot token and notifications are saved by this card's own buttons;
+    /// the bot itself runs in the service, which reports it in status.json.
+    fn telegram_card(&mut self, ui: &mut egui::Ui) {
+        let state = self.snapshot_view().snapshot.and_then(|s| s.telegram);
+        theme::card(ui, "TELEGRAM", |ui| {
+            ui.label(
+                RichText::new(
+                    "Керування ПК з телефона: стан, вимкнення, гібернація, \
+                     а також сповіщення про зникнення мережі.",
+                )
+                .color(theme::WEAK),
+            );
+            ui.horizontal(|ui| {
+                ui.label("Токен бота");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.tg_token)
+                        .password(true)
+                        .hint_text("123456789:AA…")
+                        .desired_width(260.0),
+                );
+            });
+            if self.saved.telegram_token.is_empty() {
+                ui.label(
+                    RichText::new(
+                        "Як отримати токен: у Telegram відкрийте @BotFather, надішліть /newbot, \
+                         придумайте назву та ім'я бота (наприкінці має бути «bot»). BotFather \
+                         надішле токен — вставте його сюди й натисніть «Зберегти».",
+                    )
+                    .color(theme::WEAK),
+                );
+            }
+            let mut notify = self.saved.telegram_notify;
+            let notify_changed = ui
+                .checkbox(
+                    &mut notify,
+                    "Сповіщати про зникнення й відновлення мережі, низький заряд, вимкнення ПК",
+                )
+                .changed();
+            let token = self.tg_token.trim().to_string();
+            let (save, turn_off) = ui
+                .horizontal(|ui| {
+                    let save = ui
+                        .add_enabled(
+                            token != self.saved.telegram_token.0,
+                            theme::primary("Зберегти", theme::ACCENT),
+                        )
+                        .clicked();
+                    let off = !self.saved.telegram_token.is_empty()
+                        && ui.button("Вимкнути бота").clicked();
+                    (save, off)
+                })
+                .inner;
+
+            let mut cfg = self.saved.clone();
+            cfg.telegram_notify = notify;
+            if save {
+                if token.is_empty() || token.contains(':') {
+                    cfg.telegram_token = Secret(token);
+                } else {
+                    self.tg_msg = Some(Err(
+                        "Це не схоже на токен: він має вигляд 123456789:AA…".into()
+                    ));
+                }
+            }
+            if turn_off {
+                cfg.telegram_token = Secret::default();
+                self.tg_token.clear();
+            }
+            if cfg != self.saved {
+                self.tg_msg = match cfg.save() {
+                    Ok(()) => {
+                        self.saved.telegram_token = cfg.telegram_token.clone();
+                        self.saved.telegram_notify = cfg.telegram_notify;
+                        self.form.telegram_token = cfg.telegram_token;
+                        self.form.telegram_notify = cfg.telegram_notify;
+                        (save || turn_off).then(|| {
+                            Ok("Збережено. Служба підхопить зміни протягом хвилини.".into())
+                        })
+                    }
+                    Err(e) => Some(Err(format!("Не вдалося зберегти: {e}"))),
+                };
+            } else if notify_changed {
+                self.tg_msg = None;
+            }
+
+            match &state {
+                _ if self.saved.telegram_token.is_empty() => {}
+                Some(BotState::Connecting) => {
+                    ui.label("Підключення до Telegram…");
+                }
+                Some(BotState::Pairing { bot, code }) => {
+                    ui.label(format!(
+                        "Бот {bot} працює. Щоб прив'язати свій Telegram, відкрийте чат з {bot} \
+                         і надішліть йому код:"
+                    ));
+                    ui.label(RichText::new(code).monospace().size(22.0).strong());
+                    ui.label(
+                        RichText::new(
+                            "Після прив'язки бот виконуватиме команди лише з вашого чату.",
+                        )
+                        .color(theme::WEAK),
+                    );
+                }
+                Some(BotState::Linked { bot, who }) => {
+                    ui.label(
+                        RichText::new(format!("Бот {bot} прив'язано: {who}."))
+                            .color(Level::Ok.color()),
+                    );
+                    ui.label(
+                        RichText::new(
+                            "Команди в чаті з ботом: /status, /shutdown, /hibernate, /cancel. \
+                             Вимкнення й гібернація просять підтвердження. Щоб прив'язати \
+                             інший акаунт, надішліть боту /unlink.",
+                        )
+                        .color(theme::WEAK),
+                    );
+                }
+                Some(BotState::Error { message }) => {
+                    ui.label(RichText::new(message).color(Level::Alarm.color()));
+                }
+                Some(BotState::Off) | None => {
+                    ui.label(
+                        RichText::new("Служба ще не запустила бота. Чи працює служба GearUps?")
+                            .color(theme::WEAK),
+                    );
+                }
+            }
+            match &self.tg_msg {
                 Some(Ok(m)) => {
                     ui.label(RichText::new(m).color(Level::Ok.color()));
                 }
@@ -960,7 +1086,12 @@ impl GuiApp {
                 self.settings_msg = None;
             }
             if ui.button("Типові значення").clicked() {
-                self.form = Config::default();
+                // The Telegram card has its own buttons; keep the bot.
+                self.form = Config {
+                    telegram_token: self.saved.telegram_token.clone(),
+                    telegram_notify: self.saved.telegram_notify,
+                    ..Config::default()
+                };
             }
         });
         match &self.settings_msg {
