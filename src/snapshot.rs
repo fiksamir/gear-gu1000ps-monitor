@@ -27,6 +27,9 @@ pub struct Snapshot {
     /// Time left until the service powers the PC off (on battery only).
     pub pc_shutdown_in_secs: Option<u64>,
     pub pc_shutdown_requested: bool,
+    /// When the requested power-off happens (after its countdown).
+    #[serde(default)]
+    pub pc_shutdown_at_unix: Option<u64>,
     pub ups_off_sent: bool,
     pub poll_interval_secs: u64,
     /// How long the UPS has been repeating the same status line, once that

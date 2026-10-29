@@ -184,6 +184,8 @@ struct Monitor {
     gauge: Gauge,
     pc_shutdown_requested: bool,
     pc_shutdown_at: Instant,
+    /// When Windows will power off (unix seconds), for the window's countdown.
+    pc_shutdown_deadline: u64,
     ups_off_sent: bool,
     /// Last raw Q1 reply and when it last changed: the USB bridge can hang
     /// and keep answering with the same stale line.
@@ -218,6 +220,7 @@ impl Monitor {
             gauge: Gauge::load(),
             pc_shutdown_requested: false,
             pc_shutdown_at: Instant::now(),
+            pc_shutdown_deadline: 0,
             ups_off_sent: false,
             last_raw: None,
             archiver: history::Archiver::default(),
@@ -342,9 +345,10 @@ impl Monitor {
         }
     }
 
-    fn shutdown_started(&mut self) {
+    fn shutdown_started(&mut self, grace_secs: u32) {
         self.pc_shutdown_requested = true;
         self.pc_shutdown_at = Instant::now();
+        self.pc_shutdown_deadline = snapshot::unix_now() + grace_secs as u64;
     }
 
     fn poll(&mut self) {
@@ -479,7 +483,7 @@ impl Monitor {
                     &format!("ДБЖ GEAR: {why}. Комп'ютер буде вимкнено."),
                     grace,
                 ) {
-                    Ok(()) => self.shutdown_started(),
+                    Ok(()) => self.shutdown_started(grace),
                     Err(e) => log(&format!("InitiateShutdown не вдався: {e}")),
                 }
             }
@@ -568,7 +572,7 @@ impl Monitor {
                     telegram::SHUTDOWN_GRACE_SECS,
                 ) {
                     Ok(()) => {
-                        self.shutdown_started();
+                        self.shutdown_started(telegram::SHUTDOWN_GRACE_SECS);
                         self.publish();
                     }
                     Err(e) => {
@@ -636,6 +640,9 @@ impl Monitor {
             on_battery_secs,
             pc_shutdown_in_secs,
             pc_shutdown_requested: self.pc_shutdown_requested,
+            pc_shutdown_at_unix: self
+                .pc_shutdown_requested
+                .then_some(self.pc_shutdown_deadline),
             ups_off_sent: self.ups_off_sent,
             poll_interval_secs: self.cfg.poll_interval_secs,
             frozen_secs: self.frozen.then(|| self.raw_changed_at.elapsed().as_secs()),

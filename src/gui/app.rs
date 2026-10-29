@@ -75,6 +75,8 @@ struct Summary {
     nominal: f32,
     /// The service's counted charge (%) and capacity (Ah).
     counted: Option<(f32, f32)>,
+    /// Windows is powering off: the banner counts down every second.
+    shutting_down: bool,
 }
 
 impl GuiApp {
@@ -142,6 +144,7 @@ fn summarize(v: &View, cfg: &Config) -> Summary {
         status: None,
         nominal: 24.0,
         counted: None,
+        shutting_down: false,
     };
     match &v.direct {
         Some(Ok((st, nominal))) => {
@@ -183,6 +186,12 @@ fn summarize(v: &View, cfg: &Config) -> Summary {
         return s;
     };
     let elapsed = snapshot::unix_now().saturating_sub(snap.updated_unix);
+    s.shutting_down = snap.pc_shutdown_requested;
+    // Seconds until the requested power-off; zero once it is under way.
+    let shutdown_left = snap
+        .pc_shutdown_at_unix
+        .map(|at| at.saturating_sub(snapshot::unix_now()))
+        .filter(|&left| left > 0);
     if let Some(frozen) = snap.frozen_secs {
         s.level = Level::Alarm;
         s.title = "Дані від ДБЖ не оновлюються".into();
@@ -213,7 +222,10 @@ fn summarize(v: &View, cfg: &Config) -> Summary {
         let (charge, minutes) = on_battery_estimate(&st, s.nominal, cfg, s.counted);
         let battery = format!("Заряд ~{charge} %, вистачить на {}.", runtime_text(minutes));
         s.detail = if snap.pc_shutdown_requested {
-            "ПК вимикається.".into()
+            match shutdown_left {
+                Some(left) => format!("{battery} ПК вимкнеться через {}.", mmss(left)),
+                None => "ПК вимикається.".into(),
+            }
         } else if let Some(left) = snap.pc_shutdown_in_secs {
             format!(
                 "Без мережі {}. {battery} ПК вимкнеться через {}.",
@@ -226,7 +238,10 @@ fn summarize(v: &View, cfg: &Config) -> Summary {
     } else if snap.pc_shutdown_requested {
         // On mains only a command from Telegram powers the PC off.
         s.level = Level::Warn;
-        s.title = "ПК вимикається".into();
+        s.title = match shutdown_left {
+            Some(left) => format!("ПК вимкнеться через {}", mmss(left)),
+            None => "ПК вимикається".into(),
+        };
         s.detail = "Вимкнення за командою з Telegram. Скасувати: /cancel у чаті з ботом.".into();
     } else {
         s.level = Level::Ok;
@@ -290,9 +305,13 @@ impl eframe::App for GuiApp {
         // starts; not for service/USB start-up states, which happen every boot.
         // A secondary monitor may not be on the UPS and go dark, so the
         // window moves to the primary one first.
-        let alarm = summary.status.as_ref().is_some_and(|s| {
-            s.on_battery() || s.battery_low() || s.ups_failed() || s.shutdown_active()
-        });
+        let alarm = summary.shutting_down
+            || summary.status.as_ref().is_some_and(|s| {
+                s.on_battery() || s.battery_low() || s.ups_failed() || s.shutdown_active()
+            });
+        if summary.shutting_down {
+            ctx.request_repaint_after(Duration::from_secs(1));
+        }
         if alarm && self.last_alarm == Some(false) {
             crate::move_to_primary_monitor();
             crate::show_window(false);
