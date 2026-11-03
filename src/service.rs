@@ -359,10 +359,12 @@ impl Monitor {
         if let Some(s) = self.query() {
             // Only fresh readings go to the history; publish() also runs
             // from on_power_down with the last known status.
-            let sample = history::Sample::from_status(snapshot::unix_now(), &s);
+            let mut sample = history::Sample::from_status(snapshot::unix_now(), &s);
+            // After handle(), so the gauge has counted this poll.
+            self.handle(s);
+            sample.counted_pct = self.counted_charge();
             history::append(sample);
             self.archiver.push(sample);
-            self.handle(s);
         }
         self.publish();
     }
@@ -493,6 +495,11 @@ impl Monitor {
         }
 
         self.last = Some(s);
+    }
+
+    fn counted_charge(&self) -> f32 {
+        let capacity = self.gauge.capacity(self.cfg.battery_ah as f32);
+        self.gauge.charge_pct(snapshot::unix_now(), capacity)
     }
 
     fn count_charge(&mut self, s: &Status) {
@@ -646,7 +653,7 @@ impl Monitor {
             ups_off_sent: self.ups_off_sent,
             poll_interval_secs: self.cfg.poll_interval_secs,
             frozen_secs: self.frozen.then(|| self.raw_changed_at.elapsed().as_secs()),
-            battery_charge_pct: Some(self.gauge.charge_pct(snapshot::unix_now(), capacity)),
+            battery_charge_pct: Some(self.counted_charge()),
             battery_capacity_ah: Some(capacity),
             battery_learned_on: self.gauge.learned_on.clone(),
             telegram: Some(self.bot.state()),

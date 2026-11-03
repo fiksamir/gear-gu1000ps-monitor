@@ -744,7 +744,8 @@ fn describe(snap: &Snapshot, cfg: &Config) -> String {
         }
     } else {
         lines.push(format!("🔌 Живлення від мережі, {:.0} В.", st.input_v));
-        if let Some(pct) = st.charge_pct {
+        let counted = snap.battery_charge_pct.map(|c| c.round() as u32);
+        if let Some(pct) = counted.or(st.charge_pct) {
             lines.push(format!("Заряд батареї {pct} %."));
         }
     }

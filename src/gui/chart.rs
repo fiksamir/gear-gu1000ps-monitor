@@ -553,11 +553,18 @@ pub fn show(
             "Заряд батареї, %",
             |y| format!("{y:.0} %"),
             20.0,
-            &[Series {
-                name: "Заряд (від ДБЖ)",
-                color: Color32::from_rgb(67, 160, 71),
-                value: |s| s.charge_pct,
-            }],
+            &[
+                Series {
+                    name: "Заряд (розрахунок)",
+                    color: Color32::from_rgb(67, 160, 71),
+                    value: |s| s.counted_pct,
+                },
+                Series {
+                    name: "Заряд (від ДБЖ)",
+                    color: crate::theme::WEAK,
+                    value: |s| s.charge_pct,
+                },
+            ],
             ctx,
         ),
         Kind::Temperature => plot(
@@ -854,6 +861,7 @@ mod tests {
             on_battery: false,
             temp_c: v,
             charge_pct: v,
+            counted_pct: v,
         }
     }
 

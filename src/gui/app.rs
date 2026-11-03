@@ -605,7 +605,11 @@ impl GuiApp {
                 charge as f32 / 100.0,
                 format!("{volts} · вистачить на {}", runtime_text(minutes)),
             )
-        } else if let Some(charge) = st.charge_pct {
+        } else if let Some(charge) = summary
+            .counted
+            .map(|(charge, _)| charge.round() as u32)
+            .or(st.charge_pct)
+        {
             let what = if charge >= 100 {
                 "на підзарядці"
             } else {

@@ -4,7 +4,7 @@
 //! For longer periods the service also keeps `history-archive.csv`: one line
 //! per `ARCHIVE_SECS` with that slot's means, kept for good (about 5 MB a year).
 //!
-//! Line format: `unix_secs,input_v,output_v,load_pct,battery_v,on_battery,temp_c,charge_pct`.
+//! Line format: `unix_secs,input_v,output_v,load_pct,battery_v,on_battery,temp_c,charge_pct,counted_pct`.
 //! Older lines lack the trailing fields (and `charge_pct` is empty when the
 //! UPS did not report it); those read as NaN and are left out of the chart.
 
@@ -32,6 +32,8 @@ pub struct Sample {
     pub temp_c: f32,
     /// Charge reported by the UPS (index 0xf3), NaN when unknown.
     pub charge_pct: f32,
+    /// Charge counted by the service (`battery::Gauge`), NaN when unknown.
+    pub counted_pct: f32,
 }
 
 impl Sample {
@@ -45,17 +47,21 @@ impl Sample {
             on_battery: s.on_battery(),
             temp_c: s.temp_c,
             charge_pct: s.charge_pct.map_or(f32::NAN, |c| c as f32),
+            counted_pct: f32::NAN,
         }
     }
 
     fn to_line(self) -> String {
-        let charge = if self.charge_pct.is_finite() {
-            format!("{:.0}", self.charge_pct)
-        } else {
-            String::new()
+        let pct = |v: f32| {
+            if v.is_finite() {
+                format!("{v:.0}")
+            } else {
+                String::new()
+            }
         };
+        let (charge, counted) = (pct(self.charge_pct), pct(self.counted_pct));
         format!(
-            "{},{:.1},{:.1},{:.0},{:.2},{},{:.1},{charge}\n",
+            "{},{:.1},{:.1},{:.0},{:.2},{},{:.1},{charge},{counted}\n",
             self.t,
             self.input_v,
             self.output_v,
@@ -78,6 +84,7 @@ impl Sample {
             on_battery: next()? == "1",
             temp_c: next().and_then(|v| v.parse().ok()).unwrap_or(f32::NAN),
             charge_pct: next().and_then(|v| v.parse().ok()).unwrap_or(f32::NAN),
+            counted_pct: next().and_then(|v| v.parse().ok()).unwrap_or(f32::NAN),
         })
     }
 }
@@ -120,6 +127,7 @@ pub fn mean(samples: &[Sample]) -> Option<Sample> {
         on_battery: samples.iter().any(|s| s.on_battery),
         temp_c: avg(|s| s.temp_c),
         charge_pct: avg(|s| s.charge_pct),
+        counted_pct: avg(|s| s.counted_pct),
     })
 }
 
@@ -278,6 +286,7 @@ mod tests {
             on_battery,
             temp_c: temp,
             charge_pct: f32::NAN,
+            counted_pct: f32::NAN,
         };
         let m = mean(&[s(600, 1.0, f32::NAN, false), s(605, 3.0, 40.0, true)]).unwrap();
         assert_eq!(m.t, 750);
@@ -299,10 +308,12 @@ mod tests {
             on_battery: false,
             temp_c: 22.0,
             charge_pct: 88.0,
+            counted_pct: 41.0,
         };
         assert_eq!(Sample::parse(&s.to_line()), Some(s));
         let old = Sample::parse("1760000000,226.0,225.5,12,27.10,0,22.0").unwrap();
         assert!(old.charge_pct.is_nan());
+        assert!(old.counted_pct.is_nan());
         let unknown = Sample::parse("1760000000,226.0,225.5,12,27.10,0,22.0,").unwrap();
         assert!(unknown.charge_pct.is_nan());
         let b = Sample {
