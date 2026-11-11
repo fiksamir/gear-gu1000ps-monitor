@@ -18,7 +18,7 @@ use crate::config::{self, Config};
 use crate::events;
 use crate::hid::Ups;
 use crate::history;
-use crate::inverter::{self, Detector};
+use crate::inverter::Detector;
 use crate::protocol::{self, Ratings, Status};
 use crate::snapshot::{self, Snapshot};
 use crate::telegram::{self, Note, Remote};
@@ -211,15 +211,17 @@ struct Monitor {
 /// byte-for-byte identical this long means the USB bridge has hung.
 const FROZEN_AFTER: Duration = Duration::from_secs(10 * 60);
 
-/// A detector primed with the end of the history, so a restart does not
-/// hide a running inverter for the length of the window.
+/// A detector primed with the whole history: it knows the inverter's usual
+/// voltage, and a restart does not hide a running inverter for the length
+/// of the window.
 fn recent_inverter() -> Detector {
-    let mut d = Detector::default();
-    // About 45 bytes a line: a window at a 2-second poll and then some.
-    for s in history::tail(inverter::WINDOW_SECS * 30) {
-        d.push(s.t, s.input_v, s.on_battery);
+    let mut reader = history::Reader::default();
+    reader.refresh();
+    let detector = std::mem::take(&mut reader.inverter).into_detector();
+    if let Some(v) = detector.usual_v() {
+        log(&format!("звична напруга інвертора за історією: {v} В"));
     }
-    d
+    detector
 }
 
 impl Monitor {

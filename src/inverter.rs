@@ -33,7 +33,16 @@ pub struct Detector {
     /// First reading after the input dropped out (or after a gap in the
     /// readings): switching between mains and inverter happens only then.
     reset_at: Option<u64>,
+    /// Readings per volt of the current stretch, and its last reading.
+    stretch: HashMap<i32, u64>,
+    last_t: u64,
+    /// Readings per volt of all stretches of at least `LEARN_SECS`: the
+    /// inverter's usual output is the most common of them.
+    learned: HashMap<i32, u64>,
 }
+
+/// Stretches at least this long teach the inverter's usual voltage.
+const LEARN_SECS: u64 = 60 * 60;
 
 impl Detector {
     /// Feeds one reading; returns since when (unix seconds) the input has
@@ -53,6 +62,10 @@ impl Detector {
         }
         let v = input_v.round() as i32;
         self.reset_at.get_or_insert(t);
+        self.last_t = t;
+        if self.since.is_some() {
+            *self.stretch.entry(v).or_default() += 1;
+        }
         self.window.push_back((t, v));
         *self.counts.entry(v).or_default() += 1;
         while let Some(&(old, ov)) = self.window.front() {
@@ -83,10 +96,20 @@ impl Detector {
         // Mains turning flat on its own is not a switch to the inverter: the
         // flat stretch has to start soon after the input came back.
         let fresh = self.reset_at.is_some_and(|r| first <= r + GRACE_SECS);
+        // Once the inverter's voltage is known, flat input far from it is
+        // quiet mains.
+        let top = self.counts.iter().max_by_key(|&(_, c)| *c).map(|(v, _)| *v);
+        let usual = match (self.usual_v(), top) {
+            (Some(u), Some(top)) => (top - u).abs() <= 1,
+            _ => true,
+        };
         match self.since {
             // The flat stretch began with the window, not when it filled.
-            None if share >= ENTER && fresh => self.since = Some(first),
-            Some(_) if share < LEAVE => self.since = None,
+            None if share >= ENTER && fresh && usual => {
+                self.since = Some(first);
+                self.stretch = self.counts.iter().map(|(&v, &c)| (v, c as u64)).collect();
+            }
+            Some(_) if share < LEAVE => self.end_stretch(),
             _ => {}
         }
         self.since
@@ -96,10 +119,30 @@ impl Detector {
         self.since
     }
 
+    /// The inverter's usual output, once a long stretch has shown it.
+    pub fn usual_v(&self) -> Option<i32> {
+        self.learned
+            .iter()
+            .max_by_key(|&(v, c)| (*c, -*v))
+            .map(|(v, _)| *v)
+    }
+
+    /// Ends the current stretch; a long one teaches the usual voltage.
+    fn end_stretch(&mut self) {
+        if let Some(since) = self.since.take() {
+            if self.last_t.saturating_sub(since) >= LEARN_SECS {
+                for (v, c) in self.stretch.drain() {
+                    *self.learned.entry(v).or_default() += c;
+                }
+            }
+        }
+        self.stretch.clear();
+    }
+
     pub fn reset(&mut self) {
+        self.end_stretch();
         self.window.clear();
         self.counts.clear();
-        self.since = None;
         self.reset_at = None;
     }
 }
@@ -113,6 +156,11 @@ pub struct Periods {
 }
 
 impl Periods {
+    /// The detector after the samples so far, to go on from live readings.
+    pub fn into_detector(self) -> Detector {
+        self.detector
+    }
+
     pub fn push(&mut self, s: &Sample) {
         match self.detector.push(s.t, s.input_v, s.on_battery) {
             Some(_) if self.open => {
@@ -180,6 +228,20 @@ mod tests {
         assert!(d.push(1000, 221.0, false).is_some());
         let mains = (0..60).map(|i| 228.0 + (i % 6) as f32);
         assert_eq!(feed(&mut d, 1005, mains), None);
+    }
+
+    #[test]
+    fn learns_the_usual_voltage_and_skips_flat_mains_elsewhere() {
+        let mut d = Detector::default();
+        // A long stretch at 226 V, ended by a dropout.
+        assert!(feed(&mut d, 0, (0..800).map(|_| 226.0)).is_some());
+        assert_eq!(d.push(4005, 0.0, true), None);
+        assert_eq!(d.usual_v(), Some(226));
+        // Flat 229 V after a dropout is now quiet mains...
+        assert_eq!(feed(&mut d, 4010, (0..300).map(|_| 229.0)), None);
+        // ...but flat 227 V is still the inverter.
+        assert_eq!(d.push(5510, 0.0, true), None);
+        assert_eq!(feed(&mut d, 5515, (0..300).map(|_| 227.0)), Some(5515));
     }
 
     #[test]

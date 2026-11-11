@@ -197,28 +197,6 @@ pub fn append(s: Sample) {
     append_to(&path, s);
 }
 
-/// The newest samples of `history.csv` from roughly the last `bytes`.
-pub fn tail(bytes: u64) -> Vec<Sample> {
-    let mut out = Vec::new();
-    let Ok(mut f) = File::open(path()) else {
-        return out;
-    };
-    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
-    let start = len.saturating_sub(bytes);
-    let mut buf = Vec::new();
-    if f.seek(SeekFrom::Start(start)).is_ok() && f.read_to_end(&mut buf).is_ok() {
-        let text = String::from_utf8_lossy(&buf);
-        // A cut first line would parse as a wrong sample.
-        let text = if start > 0 {
-            text.split_once('\n').map_or("", |(_, rest)| rest)
-        } else {
-            &text
-        };
-        parse_all(text, &mut out);
-    }
-    out
-}
-
 fn parse_all(text: &str, out: &mut Vec<Sample>) {
     out.extend(text.lines().filter_map(Sample::parse));
 }
