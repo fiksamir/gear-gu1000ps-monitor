@@ -229,8 +229,12 @@ pub fn show(
     let mains_color = if f.mains_ok { pal.mains } else { pal.alarm };
     d.end(
         mains_at,
-        None,
-        if inverter { "Інвертор?" } else { "Мережа" },
+        if inverter {
+            Icon::Inverter
+        } else {
+            Icon::Pylon
+        },
+        if inverter { "Інвертор" } else { "Мережа" },
         mains_color,
         &format!("{:.1} В", s.input_v),
         &format!("{:.1} Гц", s.freq_hz),
@@ -242,7 +246,7 @@ pub fn show(
     };
     d.end(
         pc_at,
-        Some("🖥"),
+        Icon::Glyph("🖥"),
         "Вихід на ПК",
         pc_color,
         &format!("{:.1} В", s.output_v),
@@ -470,7 +474,7 @@ impl Drawer<'_> {
     fn end(
         &self,
         at: Pos2,
-        icon: Option<&str>,
+        icon: Icon,
         caption: &str,
         color: Color32,
         main: &str,
@@ -479,11 +483,17 @@ impl Drawer<'_> {
         self.painter
             .circle(at, BADGE_R, Color32::WHITE, Stroke::new(2.5, color));
         match icon {
-            Some(glyph) => crate::theme::badge(self.painter, at, BADGE_R - 2.5, glyph, color),
-            None => {
+            Icon::Glyph(glyph) => {
+                crate::theme::badge(self.painter, at, BADGE_R - 2.5, glyph, color)
+            }
+            Icon::Pylon | Icon::Inverter => {
                 self.painter
                     .circle_filled(at, BADGE_R - 2.5, color.gamma_multiply(0.14));
-                pylon(self.painter, at, 15.0, color);
+                if icon == Icon::Pylon {
+                    pylon(self.painter, at, 15.0, color);
+                } else {
+                    inverter_symbol(self.painter, at, 12.0, color);
+                }
             }
         }
         let below = at.y + BADGE_R;
@@ -521,6 +531,37 @@ fn sine(p: &egui::Painter, start: Pos2, width: f32, amplitude: f32, periods: f32
         })
         .collect();
     p.add(Shape::line(points, stroke));
+}
+
+/// What a diagram end shows in its badge.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Icon<'a> {
+    Glyph(&'a str),
+    /// Mains: a power-line pylon.
+    Pylon,
+    /// A separate battery inverter: the DC-to-AC circuit symbol.
+    Inverter,
+}
+
+/// The inverter circuit symbol, `h` half-size around `c`: a square split by
+/// a diagonal, DC (a solid over a dashed line) top left, a sine bottom right.
+fn inverter_symbol(p: &egui::Painter, c: Pos2, h: f32, color: Color32) {
+    let stroke = Stroke::new(1.6, color);
+    let pt = |x: f32, y: f32| c + Vec2::new(x * h, y * h);
+    p.rect_stroke(
+        Rect::from_min_max(pt(-1.0, -1.0), pt(1.0, 1.0)),
+        2.0,
+        stroke,
+        egui::StrokeKind::Middle,
+    );
+    p.line_segment([pt(-1.0, 1.0), pt(1.0, -1.0)], stroke);
+    // DC: a solid line over a dashed one.
+    p.line_segment([pt(-0.75, -0.55), pt(-0.15, -0.55)], stroke);
+    for x in [-0.75, -0.48, -0.21] {
+        p.line_segment([pt(x, -0.3), pt(x + 0.14, -0.3)], stroke);
+    }
+    // AC: one period of a sine.
+    sine(p, pt(0.12, 0.45), 0.66 * h, 0.17 * h, 1.0, stroke);
 }
 
 /// A power-line pylon `h` half-height around `c`.

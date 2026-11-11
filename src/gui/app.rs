@@ -14,7 +14,7 @@ use gear_ups::snapshot;
 use gear_ups::telegram::BotState;
 
 use crate::backend::{self, Outcome, SvcState, View};
-use crate::chart::{self, Period};
+use crate::chart;
 use crate::diagram;
 use crate::theme;
 use crate::tray::{Level, Requests, Tray};
@@ -45,7 +45,7 @@ pub struct GuiApp {
     requests: Arc<Requests>,
     tray: Option<Tray>,
     tab: Tab,
-    period: Period,
+    period: chart::PeriodPick,
     chart_order: Vec<chart::Kind>,
     quitting: bool,
     last_alarm: Option<bool>,
@@ -101,7 +101,7 @@ impl GuiApp {
             requests,
             tray,
             tab: Tab::Status,
-            period: Period::Hour1,
+            period: chart::PeriodPick::default(),
             chart_order: chart::load_order(),
             quitting: false,
             last_alarm: None,

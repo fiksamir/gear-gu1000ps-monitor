@@ -31,10 +31,33 @@ pub enum Period {
     Month,
     HalfYear,
     All,
+    /// One calendar day picked in `DayPick`.
+    Date,
+}
+
+/// The chosen period, and for `Period::Date` the day and its calendar.
+pub struct PeriodPick {
+    pub period: Period,
+    /// Local days since 1970-01-01; none means today.
+    day: Option<i64>,
+    calendar_open: bool,
+    /// Month the calendar shows: (year, month).
+    calendar_month: (i64, u32),
+}
+
+impl Default for PeriodPick {
+    fn default() -> Self {
+        PeriodPick {
+            period: Period::Hour1,
+            day: None,
+            calendar_open: false,
+            calendar_month: (1970, 1),
+        }
+    }
 }
 
 impl Period {
-    const ALL: [Period; 8] = [
+    const ALL: [Period; 9] = [
         Period::Min10,
         Period::Hour1,
         Period::Hour6,
@@ -43,6 +66,7 @@ impl Period {
         Period::Month,
         Period::HalfYear,
         Period::All,
+        Period::Date,
     ];
 
     /// Length in seconds; `All` reaches back to the oldest sample.
@@ -55,6 +79,7 @@ impl Period {
             Period::Week => 7 * DAY as u64,
             Period::Month => 30 * DAY as u64,
             Period::HalfYear => 182 * DAY as u64,
+            Period::Date => DAY as u64,
             Period::All => earliest
                 .map_or(0, |e| now.saturating_sub(e))
                 .max(DAY as u64),
@@ -71,6 +96,7 @@ impl Period {
             Period::Month => "місяць",
             Period::HalfYear => "пів року",
             Period::All => "увесь час",
+            Period::Date => "дата",
         }
     }
 }
@@ -307,6 +333,127 @@ fn hm(sod: i64) -> String {
     format!("{:02}:{:02}", sod / 3_600, sod % 3_600 / 60)
 }
 
+/// (year, month, day) to days since 1970-01-01; Howard Hinnant's algorithm.
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m as i64 + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+const WEEKDAYS: [&str; 7] = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Нд"];
+const MONTHS: [&str; 12] = [
+    "січень", "лютий", "березень", "квітень", "травень", "червень", "липень", "серпень",
+    "вересень", "жовтень", "листопад", "грудень",
+];
+
+/// Monday = 0 for days since 1970-01-01 (a Thursday).
+fn weekday(day: i64) -> usize {
+    (day + 3).rem_euclid(7) as usize
+}
+
+/// The day row of `Period::Date`: previous/next day, today, and a calendar
+/// behind the date; `data_days` lists the days that have readings.
+fn day_bar(
+    ui: &mut egui::Ui,
+    pick: &mut PeriodPick,
+    today: i64,
+    data_days: impl FnOnce() -> std::collections::BTreeSet<i64>,
+) {
+    let mut day = pick.day.unwrap_or(today).min(today);
+    ui.horizontal(|ui| {
+        if ui.button("◀").on_hover_text("Попередній день").clicked() {
+            day -= 1;
+        }
+        let (y, m, d) = civil_from_days(day);
+        let text = format!("{d:02}.{m:02}.{y}, {}", WEEKDAYS[weekday(day)]);
+        if ui
+            .selectable_label(pick.calendar_open, format!("📅 {text}"))
+            .on_hover_text("Вибрати дату в календарі")
+            .clicked()
+        {
+            pick.calendar_open = !pick.calendar_open;
+            pick.calendar_month = (y, m);
+        }
+        if ui
+            .add_enabled(day < today, egui::Button::new("▶"))
+            .on_hover_text("Наступний день")
+            .clicked()
+        {
+            day += 1;
+        }
+        if ui
+            .add_enabled(day != today, egui::Button::new("Сьогодні"))
+            .clicked()
+        {
+            day = today;
+        }
+    });
+    if pick.calendar_open {
+        let data_days = data_days();
+        crate::theme::card(ui, "", |ui| {
+            let (y, m) = &mut pick.calendar_month;
+            ui.horizontal(|ui| {
+                if ui.button("◀").on_hover_text("Попередній місяць").clicked() {
+                    (*y, *m) = if *m == 1 { (*y - 1, 12) } else { (*y, *m - 1) };
+                }
+                ui.label(RichText::new(format!("{} {y}", MONTHS[*m as usize - 1])).strong());
+                let (ty, tm, _) = civil_from_days(today);
+                if ui
+                    .add_enabled((*y, *m) < (ty, tm), egui::Button::new("▶"))
+                    .on_hover_text("Наступний місяць")
+                    .clicked()
+                {
+                    (*y, *m) = if *m == 12 { (*y + 1, 1) } else { (*y, *m + 1) };
+                }
+            });
+            let first = days_from_civil(*y, *m, 1);
+            let (ny, nm) = if *m == 12 { (*y + 1, 1) } else { (*y, *m + 1) };
+            let len = days_from_civil(ny, nm, 1) - first;
+            egui::Grid::new("calendar")
+                .spacing([4.0, 4.0])
+                .show(ui, |ui| {
+                    for name in WEEKDAYS {
+                        ui.label(RichText::new(name).color(crate::theme::WEAK));
+                    }
+                    ui.end_row();
+                    for _ in 0..weekday(first) {
+                        ui.label("");
+                    }
+                    for i in 0..len {
+                        let date = first + i;
+                        let has = data_days.contains(&date);
+                        let label = RichText::new(format!("{:>2}", i + 1));
+                        let label = if has {
+                            label.strong()
+                        } else {
+                            label.color(crate::theme::WEAK)
+                        };
+                        let button = egui::Button::selectable(date == day, label)
+                            .min_size(egui::Vec2::new(30.0, 24.0));
+                        let r = ui.add_enabled(date <= today, button);
+                        let r = if has {
+                            r
+                        } else {
+                            r.on_hover_text("Даних за цей день немає")
+                        };
+                        if r.clicked() {
+                            day = date;
+                            pick.calendar_open = false;
+                        }
+                        if weekday(date) == 6 {
+                            ui.end_row();
+                        }
+                    }
+                });
+        });
+    }
+    pick.day = Some(day);
+}
+
 /// Days since 1970-01-01 to (year, month, day); Howard Hinnant's algorithm.
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
@@ -434,14 +581,14 @@ fn save_order(order: &[Kind]) {
 pub fn show(
     ui: &mut egui::Ui,
     history: &Reader,
-    period: &mut Period,
+    pick: &mut PeriodPick,
     order: &mut [Kind],
     nominal_battery_v: f32,
     ups_power_w: u32,
     now: u64,
 ) {
     let items: Vec<(Period, &str)> = Period::ALL.iter().map(|&p| (p, p.label())).collect();
-    crate::theme::segmented(ui, period, &items);
+    crate::theme::segmented(ui, &mut pick.period, &items);
     ui.add_space(crate::theme::GAP);
 
     let (samples, archive) = (&history.samples[..], &history.archive[..]);
@@ -449,8 +596,27 @@ pub fn show(
     let detailed_from = samples.first().map_or(u64::MAX, |s| s.t);
     let older = &archive[..archive.partition_point(|s| s.t < detailed_from)];
     let earliest = older.first().or(samples.first()).map(|s| s.t);
-    let span = period.secs(earliest, now);
-    let from = now.saturating_sub(span);
+    let offset = utc_offset_secs(now);
+    let span = pick.period.secs(earliest, now);
+    // The plotted time range: up to now, or one whole picked day.
+    let (from, to) = if pick.period == Period::Date {
+        let today = (now as i64 + offset).div_euclid(DAY);
+        day_bar(ui, pick, today, || {
+            archive
+                .iter()
+                .chain(samples)
+                .map(|s| (s.t as i64 + offset).div_euclid(DAY))
+                .collect()
+        });
+        ui.add_space(crate::theme::GAP);
+        let start = (pick.day.unwrap_or(today) * DAY - offset).max(0) as u64;
+        (start, start + DAY as u64)
+    } else {
+        (now.saturating_sub(span), now)
+    };
+    // Nothing after the range, so its last value and Y range fit it.
+    let samples = &samples[..samples.partition_point(|s| s.t <= to)];
+    let older = &older[..older.partition_point(|s| s.t <= to)];
     if samples.last().or(older.last()).is_none_or(|s| s.t < from) {
         crate::theme::card(ui, "", |ui| {
             ui.label("За цей період даних немає.");
@@ -462,7 +628,6 @@ pub fn show(
         return;
     }
 
-    let offset = utc_offset_secs(now);
     // Long periods are mostly short stretches between PC-off gaps; coarser
     // buckets smooth those out.
     let buckets = if span > 2 * DAY as u64 {
@@ -471,7 +636,7 @@ pub fn show(
         MAX_BUCKETS
     };
     let bucket = span / buckets;
-    let x_range = (from as i64 + offset) as f64..=(now as i64 + offset) as f64;
+    let x_range = (from as i64 + offset) as f64..=(to as i64 + offset) as f64;
     let labels = Labels::for_span(span);
     let blue = Color32::from_rgb(66, 133, 244);
     let nominal = nominal_battery_v as f64;
@@ -1034,6 +1199,16 @@ mod tests {
             ]
         );
         assert_eq!(parse_order(""), Kind::ALL.to_vec());
+    }
+
+    #[test]
+    fn calendar_days_round_trip() {
+        for day in [-1, 0, 59, 11_016, 20_403, 20_768] {
+            let (y, m, d) = civil_from_days(day);
+            assert_eq!(days_from_civil(y, m, d), day);
+        }
+        // 11.11.2026 is a Wednesday.
+        assert_eq!(WEEKDAYS[weekday(days_from_civil(2026, 11, 11))], "Ср");
     }
 
     #[test]
