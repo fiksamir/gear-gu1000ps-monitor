@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use eframe::egui;
 use windows_sys::Win32::Foundation::{
-    GetLastError, ERROR_ALREADY_EXISTS, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+    CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
 };
 use windows_sys::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
@@ -33,13 +33,28 @@ use gear_ups::winutil::wide;
 
 const TITLE: &str = "ДБЖ GEAR";
 
+/// Passed to the new window after an update: the old one is still quitting.
+pub const AFTER_UPDATE: &str = "--after-update";
+
 /// Returns false if another copy is already running (and brings it up).
+/// After an update it first waits for the old copy to quit.
 fn single_instance() -> bool {
     let name = wide("Local\\GearUpsGui");
-    // The handle is intentionally leaked: it must live as long as the process.
-    unsafe { CreateMutexW(null(), 0, name.as_ptr()) };
-    if unsafe { GetLastError() } != ERROR_ALREADY_EXISTS {
-        return true;
+    let tries = if std::env::args().any(|a| a == AFTER_UPDATE) {
+        100
+    } else {
+        1
+    };
+    for i in 0..tries {
+        // The handle is intentionally leaked while this copy runs.
+        let handle = unsafe { CreateMutexW(null(), 0, name.as_ptr()) };
+        if unsafe { GetLastError() } != ERROR_ALREADY_EXISTS {
+            return true;
+        }
+        if i + 1 < tries {
+            unsafe { CloseHandle(handle) };
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
     }
     show_window(true);
     false

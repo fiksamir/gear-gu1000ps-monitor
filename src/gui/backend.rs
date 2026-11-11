@@ -9,8 +9,14 @@ use std::time::{Duration, SystemTime};
 
 use windows_service::service::{ServiceAccess, ServiceState};
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
-use windows_sys::Win32::UI::Shell::ShellExecuteW;
-use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+use windows_sys::Win32::Foundation::CloseHandle;
+use windows_sys::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE};
+use windows_sys::Win32::UI::Shell::{
+    ShellExecuteExW, ShellExecuteW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
+};
+use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNORMAL};
+
+use gear_ups::update;
 
 use gear_ups::events::{self, Event};
 use gear_ups::hid::Ups;
@@ -266,6 +272,109 @@ pub fn install_service() -> Result<String, String> {
 pub fn start_service() -> Result<String, String> {
     elevate("sc.exe", &format!("start {SERVICE_NAME}"))?;
     Ok("Запуск служби…".into())
+}
+
+/// Where checking for and installing an update stands.
+#[derive(Clone, Default)]
+pub enum UpdateState {
+    #[default]
+    Idle,
+    Checking,
+    /// This build is the latest; the version GitHub has.
+    UpToDate(String),
+    Available(update::Release),
+    /// Downloading or installing: what is going on.
+    Working(&'static str),
+    Failed(String),
+}
+
+/// Asks GitHub for the latest release in the background.
+pub fn check_update(state: &Arc<Mutex<UpdateState>>, ctx: &eframe::egui::Context) {
+    let (state, ctx) = (Arc::clone(state), ctx.clone());
+    set(&state, &ctx, UpdateState::Checking);
+    thread::spawn(move || {
+        let next = match update::latest() {
+            Ok(r) if update::is_newer(&r.version, env!("CARGO_PKG_VERSION")) => {
+                UpdateState::Available(r)
+            }
+            Ok(r) => UpdateState::UpToDate(r.version),
+            Err(e) => UpdateState::Failed(e),
+        };
+        set(&state, &ctx, next);
+    });
+}
+
+/// Downloads `release`, installs it as administrator, then starts the new
+/// window and asks this one to quit.
+pub fn install_update(
+    release: update::Release,
+    state: &Arc<Mutex<UpdateState>>,
+    requests: &Arc<crate::tray::Requests>,
+    ctx: &eframe::egui::Context,
+) {
+    let (state, requests, ctx) = (Arc::clone(state), Arc::clone(requests), ctx.clone());
+    set(&state, &ctx, UpdateState::Working("Завантажую з GitHub…"));
+    thread::spawn(move || {
+        let result = update::download(&release).and_then(|cli| {
+            set(&state, &ctx, UpdateState::Working("Встановлюю…"));
+            run_elevated_and_wait(&cli, "install --disable-vendor")
+        });
+        match result.and_then(|()| restart_gui()) {
+            Ok(()) => {
+                requests.quit.store(true, std::sync::atomic::Ordering::SeqCst);
+                ctx.request_repaint();
+            }
+            Err(e) => set(&state, &ctx, UpdateState::Failed(e)),
+        }
+    });
+}
+
+fn set(state: &Mutex<UpdateState>, ctx: &eframe::egui::Context, next: UpdateState) {
+    if let Ok(mut s) = state.lock() {
+        *s = next;
+    }
+    ctx.request_repaint();
+}
+
+/// Runs `program` as administrator without a console and waits for it.
+fn run_elevated_and_wait(program: &std::path::Path, params: &str) -> Result<(), String> {
+    let verb = wide("runas");
+    let file = wide(&program.to_string_lossy());
+    let params = wide(params);
+    let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+    info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+    info.fMask = SEE_MASK_NOCLOSEPROCESS;
+    info.lpVerb = verb.as_ptr();
+    info.lpFile = file.as_ptr();
+    info.lpParameters = params.as_ptr();
+    info.nShow = SW_HIDE;
+    if unsafe { ShellExecuteExW(&mut info) } == 0 || info.hProcess.is_null() {
+        return Err("Встановлення скасовано: потрібні права адміністратора".into());
+    }
+    let mut code = 1u32;
+    unsafe {
+        WaitForSingleObject(info.hProcess, INFINITE);
+        GetExitCodeProcess(info.hProcess, &mut code);
+        CloseHandle(info.hProcess);
+    }
+    if code == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "Встановлення не вдалося (код {code}), подробиці — у журналі"
+        ))
+    }
+}
+
+/// Starts the installed window; it waits until this one has quit.
+fn restart_gui() -> Result<(), String> {
+    let base = std::env::var_os("ProgramFiles").unwrap_or_else(|| "C:\\Program Files".into());
+    let gui = PathBuf::from(base).join("GearUps").join("gear-ups-gui.exe");
+    std::process::Command::new(&gui)
+        .arg(crate::AFTER_UPDATE)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("Оновлено, але не вдалося запустити {}: {e}", gui.display()))
 }
 
 /// Opens a web page in the default browser.

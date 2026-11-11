@@ -166,7 +166,7 @@ impl ApiError {
     }
 }
 
-fn agent(timeout: Duration) -> ureq::Agent {
+pub(crate) fn agent(timeout: Duration) -> ureq::Agent {
     let tls = ureq::tls::TlsConfig::builder()
         .provider(ureq::tls::TlsProvider::NativeTls)
         .root_certs(ureq::tls::RootCerts::PlatformVerifier)

@@ -13,7 +13,7 @@ use gear_ups::protocol::{self, Status};
 use gear_ups::snapshot;
 use gear_ups::telegram::BotState;
 
-use crate::backend::{self, Outcome, SvcState, View};
+use crate::backend::{self, Outcome, SvcState, UpdateState, View};
 use crate::chart;
 use crate::diagram;
 use crate::theme;
@@ -65,6 +65,7 @@ pub struct GuiApp {
     outcome_since: Option<(Result<String, String>, Instant)>,
     show_about: bool,
     about_icon: Option<egui::TextureHandle>,
+    update: Arc<Mutex<backend::UpdateState>>,
 }
 
 struct Summary {
@@ -116,6 +117,7 @@ impl GuiApp {
             beeper_outcome: Outcome::default(),
             outcome_since: None,
             show_about: false,
+            update: Default::default(),
             about_icon: None,
         }
     }
@@ -734,6 +736,75 @@ impl GuiApp {
     }
 
     /// Name, version and build, what the program is talking to, links.
+    /// "Перевірити оновлення" and, when GitHub has a newer release, its notes
+    /// and the button that installs it.
+    fn update_section(&self, ui: &mut egui::Ui, ctx: &egui::Context, summary: &Summary) {
+        let state = self.update.lock().map(|s| s.clone()).unwrap_or_default();
+        let check = |ui: &mut egui::Ui, label: &str| {
+            if ui.button(label).clicked() {
+                backend::check_update(&self.update, ctx);
+            }
+        };
+        match state {
+            UpdateState::Idle => check(ui, "Перевірити оновлення"),
+            UpdateState::Checking => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Перевіряю оновлення на GitHub…");
+                });
+            }
+            UpdateState::UpToDate(latest) => {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!("✔ Це остання версія ({latest})"))
+                            .color(Level::Ok.color()),
+                    );
+                    check(ui, "Перевірити ще раз");
+                });
+            }
+            UpdateState::Available(release) => {
+                ui.label(
+                    RichText::new(format!("Доступна нова версія {}", release.version))
+                        .strong()
+                        .color(theme::ACCENT),
+                );
+                if !release.notes.trim().is_empty() {
+                    egui::ScrollArea::vertical()
+                        .max_height(160.0)
+                        .show(ui, |ui| {
+                            ui.label(release.notes.replace("**", ""));
+                        });
+                }
+                ui.add_space(6.0);
+                // Reinstalling restarts the service, which loses the time
+                // on battery and so delays the shutdown.
+                let on_battery = summary.status.as_ref().is_some_and(|s| s.on_battery());
+                ui.horizontal(|ui| {
+                    let button = ui
+                        .add_enabled(!on_battery, theme::primary("Оновити", theme::ACCENT))
+                        .on_hover_text("Потрібні права адміністратора; служба й вікно перезапустяться")
+                        .on_disabled_hover_text("Оновлення можливе, коли є мережа");
+                    if button.clicked() {
+                        backend::install_update(release.clone(), &self.update, &self.requests, ctx);
+                    }
+                    if !release.page.is_empty() && ui.link("Сторінка випуску").clicked() {
+                        backend::open_url(&release.page);
+                    }
+                });
+            }
+            UpdateState::Working(what) => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(what);
+                });
+            }
+            UpdateState::Failed(e) => {
+                ui.label(RichText::new(e).color(Level::Alarm.color()));
+                check(ui, "Спробувати ще раз");
+            }
+        }
+    }
+
     fn about_dialog(&mut self, ctx: &egui::Context, view: &View, summary: &Summary) {
         let icon = self
             .about_icon
@@ -809,6 +880,8 @@ impl GuiApp {
                     row(ui, "Зв'язок", "USB (0001:0000), протокол Megatec Q1");
                     row(ui, "Дані й журнал", &data_dir.display().to_string());
                 });
+            ui.add_space(12.0);
+            self.update_section(ui, ctx, summary);
             ui.add_space(12.0);
             ui.horizontal(|ui| {
                 if ui.link("GitHub").clicked() {

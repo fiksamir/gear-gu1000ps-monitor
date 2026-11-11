@@ -11,4 +11,5 @@ pub mod protocol;
 pub mod service;
 pub mod snapshot;
 pub mod telegram;
+pub mod update;
 pub mod winutil;
