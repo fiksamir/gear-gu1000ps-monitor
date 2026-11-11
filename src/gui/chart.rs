@@ -1001,7 +1001,8 @@ fn plot(
                     plot_ui.polygon(
                         Polygon::new(name, vec![[a, lo], [b, lo], [b, hi], [a, hi]])
                             .fill_color(shade.gamma_multiply(0.12))
-                            .stroke(egui::Stroke::NONE)
+                            // Zero width, but the colour sets the legend dot.
+                            .stroke(egui::Stroke::new(0.0, shade))
                             .allow_hover(false),
                     );
                 }

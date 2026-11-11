@@ -234,7 +234,7 @@ pub fn show(
         } else {
             Icon::Pylon
         },
-        if inverter { "Інвертор" } else { "Мережа" },
+        if inverter { "Зовн. інвертор" } else { "Мережа" },
         mains_color,
         &format!("{:.1} В", s.input_v),
         &format!("{:.1} Гц", s.freq_hz),
@@ -543,25 +543,23 @@ enum Icon<'a> {
     Inverter,
 }
 
-/// The inverter circuit symbol, `h` half-size around `c`: a square split by
-/// a diagonal, DC (a solid over a dashed line) top left, a sine bottom right.
+/// A separate battery inverter, `h` half-size around `c`: a battery over a
+/// sine (AC from a battery), unlike the UPS's own inverter symbol.
 fn inverter_symbol(p: &egui::Painter, c: Pos2, h: f32, color: Color32) {
     let stroke = Stroke::new(1.6, color);
     let pt = |x: f32, y: f32| c + Vec2::new(x * h, y * h);
     p.rect_stroke(
-        Rect::from_min_max(pt(-1.0, -1.0), pt(1.0, 1.0)),
+        Rect::from_min_max(pt(-0.8, -0.95), pt(0.65, -0.1)),
         2.0,
         stroke,
         egui::StrokeKind::Middle,
     );
-    p.line_segment([pt(-1.0, 1.0), pt(1.0, -1.0)], stroke);
-    // DC: a solid line over a dashed one.
-    p.line_segment([pt(-0.75, -0.55), pt(-0.15, -0.55)], stroke);
-    for x in [-0.75, -0.48, -0.21] {
-        p.line_segment([pt(x, -0.3), pt(x + 0.14, -0.3)], stroke);
+    // Terminal nub and two charge bars.
+    p.rect_filled(Rect::from_min_max(pt(0.7, -0.68), pt(0.92, -0.37)), 1.0, color);
+    for x in [-0.55, -0.15] {
+        p.rect_filled(Rect::from_min_max(pt(x, -0.75), pt(x + 0.28, -0.3)), 1.0, color);
     }
-    // AC: one period of a sine.
-    sine(p, pt(0.12, 0.45), 0.66 * h, 0.17 * h, 1.0, stroke);
+    sine(p, pt(-0.85, 0.55), 1.7 * h, 0.3 * h, 1.0, stroke);
 }
 
 /// A power-line pylon `h` half-height around `c`.
