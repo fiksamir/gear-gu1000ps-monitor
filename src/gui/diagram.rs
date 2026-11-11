@@ -91,6 +91,8 @@ pub fn show(
     nominal_battery_v: f32,
     ups_power_w: u32,
     counted_charge: Option<u32>,
+    // The input looks fed by a separate battery inverter, not mains.
+    inverter: bool,
 ) -> bool {
     let f = flow(s);
     let width = ui.available_width().min(720.0);
@@ -228,7 +230,7 @@ pub fn show(
     d.end(
         mains_at,
         None,
-        "Мережа",
+        if inverter { "Інвертор?" } else { "Мережа" },
         mains_color,
         &format!("{:.1} В", s.input_v),
         &format!("{:.1} Гц", s.freq_hz),

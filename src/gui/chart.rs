@@ -6,7 +6,7 @@ use std::ops::RangeInclusive;
 use eframe::egui::{self, Color32, RichText};
 use egui_plot::{
     uniform_grid_spacer, Corner, GridInput, GridMark, HoverPosition, Legend, Line, LineStyle, Plot,
-    PlotPoint, Text,
+    PlotPoint, Polygon, Text,
 };
 use windows_sys::Win32::Foundation::SYSTEMTIME;
 use windows_sys::Win32::System::SystemInformation::GetLocalTime;
@@ -504,7 +504,7 @@ pub fn show(
             20.0,
             &[
                 Series {
-                    name: "Вхід (мережа)",
+                    name: "Вхід",
                     color: blue,
                     value: |s| s.input_v,
                 },
@@ -596,6 +596,7 @@ pub fn show(
                     offset,
                     x_range: x_range.clone(),
                     labels,
+                    inverter: &history.inverter.list,
                     can_up: i > 0,
                     can_down: i < last,
                 };
@@ -641,6 +642,8 @@ struct PlotCtx<'a> {
     offset: i64,
     x_range: RangeInclusive<f64>,
     labels: Labels,
+    /// Stretches that look fed by a separate battery inverter.
+    inverter: &'a [(u64, u64)],
     can_up: bool,
     can_down: bool,
 }
@@ -774,6 +777,20 @@ fn plot(
         };
         let tolerance = (c.bucket * 2).max(step) as f64;
         let labels = c.labels;
+        // Inverter stretches as local-time x ranges, voltage plot only.
+        let inverter: Vec<(f64, f64)> = if kind == Kind::Voltage {
+            c.inverter
+                .iter()
+                .filter(|&&(_, to)| to >= c.from)
+                .map(|&(from, to)| {
+                    let x = |t: u64| (t.max(c.from) as i64 + c.offset) as f64;
+                    (x(from), x(to))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let inverter_at = inverter.clone();
         Plot::new(kind.key())
             .height(c.height)
             .legend(Legend::default().position(Corner::LeftTop))
@@ -803,11 +820,26 @@ fn plot(
                         text += &format!("{name}: {}\n", hover_text(y));
                     }
                 }
+                if inverter_at.iter().any(|&(a, b)| (a..=b).contains(&x)) {
+                    text += "Схоже, вхід від інвертора\n";
+                }
                 Some(text + &date_time(x))
             })
             .show(ui, |plot_ui| {
                 plot_ui.set_plot_bounds_x(c.x_range);
-                plot_ui.set_plot_bounds_y(y_range);
+                plot_ui.set_plot_bounds_y(y_range.clone());
+                let (lo, hi) = (*y_range.start(), *y_range.end());
+                let shade = Color32::from_rgb(255, 160, 0);
+                for (i, &(a, b)) in inverter.iter().enumerate() {
+                    // One legend entry for all of them.
+                    let name = if i == 0 { "Інвертор (імовірно)" } else { "" };
+                    plot_ui.polygon(
+                        Polygon::new(name, vec![[a, lo], [b, lo], [b, hi], [a, hi]])
+                            .fill_color(shade.gamma_multiply(0.12))
+                            .stroke(egui::Stroke::NONE)
+                            .allow_hover(false),
+                    );
+                }
                 for (s, segs) in &lines {
                     // One curve: solid over readings, faint and dashed over
                     // gaps (PC off), so the trend reads as one line.

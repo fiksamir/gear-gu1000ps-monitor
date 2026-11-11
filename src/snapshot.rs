@@ -47,6 +47,10 @@ pub struct Snapshot {
     pub battery_learned_on: Option<String>,
     #[serde(default)]
     pub telegram: Option<BotState>,
+    /// Since when (unix seconds) the input has been as flat as a separate
+    /// battery inverter's (see `inverter::Detector`), on mains only.
+    #[serde(default)]
+    pub inverter_since_unix: Option<u64>,
 }
 
 pub fn path() -> PathBuf {

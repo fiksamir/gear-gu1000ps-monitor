@@ -197,6 +197,28 @@ pub fn append(s: Sample) {
     append_to(&path, s);
 }
 
+/// The newest samples of `history.csv` from roughly the last `bytes`.
+pub fn tail(bytes: u64) -> Vec<Sample> {
+    let mut out = Vec::new();
+    let Ok(mut f) = File::open(path()) else {
+        return out;
+    };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let start = len.saturating_sub(bytes);
+    let mut buf = Vec::new();
+    if f.seek(SeekFrom::Start(start)).is_ok() && f.read_to_end(&mut buf).is_ok() {
+        let text = String::from_utf8_lossy(&buf);
+        // A cut first line would parse as a wrong sample.
+        let text = if start > 0 {
+            text.split_once('\n').map_or("", |(_, rest)| rest)
+        } else {
+            &text
+        };
+        parse_all(text, &mut out);
+    }
+    out
+}
+
 fn parse_all(text: &str, out: &mut Vec<Sample>) {
     out.extend(text.lines().filter_map(Sample::parse));
 }
@@ -210,6 +232,11 @@ pub struct Reader {
     archive_offset: u64,
     /// 5-minute means from `history-archive.csv`, oldest first.
     pub archive: Vec<Sample>,
+    /// Stretches of `samples` that look fed by an inverter; the means of the
+    /// archive are too coarse to tell.
+    pub inverter: crate::inverter::Periods,
+    /// How many of `samples` `inverter` has seen.
+    inverter_fed: usize,
 }
 
 impl Reader {
@@ -222,6 +249,8 @@ impl Reader {
             self.loaded = true;
             self.samples.clear();
             self.offset = 0;
+            self.inverter = Default::default();
+            self.inverter_fed = 0;
             if let Ok(text) = fs::read_to_string(old_path()) {
                 parse_all(&text, &mut self.samples);
             }
@@ -233,6 +262,7 @@ impl Reader {
                 changed |= consumed > 0;
             }
         }
+        self.feed_inverter();
         let path = archive_path();
         let len = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         if len < self.archive_offset {
@@ -253,7 +283,15 @@ impl Reader {
     pub fn push_live(&mut self, s: Sample) {
         if self.samples.last().is_none_or(|last| s.t > last.t) {
             self.samples.push(s);
+            self.feed_inverter();
         }
+    }
+
+    fn feed_inverter(&mut self) {
+        for s in &self.samples[self.inverter_fed.min(self.samples.len())..] {
+            self.inverter.push(s);
+        }
+        self.inverter_fed = self.samples.len();
     }
 }
 

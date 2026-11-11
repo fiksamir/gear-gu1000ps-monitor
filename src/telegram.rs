@@ -743,7 +743,14 @@ fn describe(snap: &Snapshot, cfg: &Config) -> String {
             lines.push(format!("ПК вимкнеться через {}.", duration_text(left as i64)));
         }
     } else {
-        lines.push(format!("🔌 Живлення від мережі, {:.0} В.", st.input_v));
+        match snap.inverter_since_unix {
+            Some(since) => lines.push(format!(
+                "🔌 Схоже, живлення від інвертора: вхід уже {} рівно {:.0} В.",
+                duration_text(crate::snapshot::unix_now().saturating_sub(since) as i64),
+                st.input_v
+            )),
+            None => lines.push(format!("🔌 Живлення від мережі, {:.0} В.", st.input_v)),
+        }
         let counted = snap.battery_charge_pct.map(|c| c.round() as u32);
         if let Some(pct) = counted.or(st.charge_pct) {
             lines.push(format!("Заряд батареї {pct} %."));

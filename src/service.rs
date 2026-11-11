@@ -18,6 +18,7 @@ use crate::config::{self, Config};
 use crate::events;
 use crate::hid::Ups;
 use crate::history;
+use crate::inverter::{self, Detector};
 use crate::protocol::{self, Ratings, Status};
 use crate::snapshot::{self, Snapshot};
 use crate::telegram::{self, Note, Remote};
@@ -191,6 +192,8 @@ struct Monitor {
     /// and keep answering with the same stale line.
     last_raw: Option<String>,
     archiver: history::Archiver,
+    /// Whether the input looks fed by a separate battery inverter.
+    inverter: Detector,
     raw_changed_at: Instant,
     frozen: bool,
     hot: bool,
@@ -208,6 +211,17 @@ struct Monitor {
 /// byte-for-byte identical this long means the USB bridge has hung.
 const FROZEN_AFTER: Duration = Duration::from_secs(10 * 60);
 
+/// A detector primed with the end of the history, so a restart does not
+/// hide a running inverter for the length of the window.
+fn recent_inverter() -> Detector {
+    let mut d = Detector::default();
+    // About 45 bytes a line: a window at a 2-second poll and then some.
+    for s in history::tail(inverter::WINDOW_SECS * 30) {
+        d.push(s.t, s.input_v, s.on_battery);
+    }
+    d
+}
+
 impl Monitor {
     fn new(cfg: Config, bot: telegram::Handle) -> Monitor {
         Monitor {
@@ -224,6 +238,7 @@ impl Monitor {
             ups_off_sent: false,
             last_raw: None,
             archiver: history::Archiver::default(),
+            inverter: recent_inverter(),
             raw_changed_at: Instant::now(),
             frozen: false,
             hot: false,
@@ -360,6 +375,7 @@ impl Monitor {
             // Only fresh readings go to the history; publish() also runs
             // from on_power_down with the last known status.
             let mut sample = history::Sample::from_status(snapshot::unix_now(), &s);
+            self.track_inverter(&sample);
             // After handle(), so the gauge has counted this poll.
             self.handle(s);
             sample.counted_pct = self.counted_charge();
@@ -367,6 +383,24 @@ impl Monitor {
             self.archiver.push(sample);
         }
         self.publish();
+    }
+
+    fn track_inverter(&mut self, s: &history::Sample) {
+        let was = self.inverter.since();
+        let now = self.inverter.push(s.t, s.input_v, s.on_battery);
+        match (was, now) {
+            (None, Some(since)) => log(&format!(
+                "вхідна напруга вже {} хв тримається рівно {:.0} В: схоже, ДБЖ живиться від інвертора",
+                s.t.saturating_sub(since) / 60,
+                s.input_v
+            )),
+            // Going on battery is logged on its own.
+            (Some(since), None) if !s.on_battery => log(&format!(
+                "вхідна напруга знову коливається, як у мережі (рівною була {})",
+                events::duration_text(s.t.saturating_sub(since) as i64)
+            )),
+            _ => {}
+        }
     }
 
     fn handle(&mut self, s: Status) {
@@ -657,6 +691,7 @@ impl Monitor {
             battery_capacity_ah: Some(capacity),
             battery_learned_on: self.gauge.learned_on.clone(),
             telegram: Some(self.bot.state()),
+            inverter_since_unix: self.inverter.since().filter(|_| connected && !on_battery),
         });
     }
 

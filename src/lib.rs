@@ -6,6 +6,7 @@ pub mod events;
 pub mod hid;
 pub mod history;
 pub mod icon;
+pub mod inverter;
 pub mod protocol;
 pub mod service;
 pub mod snapshot;

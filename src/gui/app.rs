@@ -77,6 +77,8 @@ struct Summary {
     counted: Option<(f32, f32)>,
     /// Windows is powering off: the banner counts down every second.
     shutting_down: bool,
+    /// On mains, but the input looks fed by a separate battery inverter.
+    inverter: bool,
 }
 
 impl GuiApp {
@@ -145,6 +147,7 @@ fn summarize(v: &View, cfg: &Config) -> Summary {
         nominal: 24.0,
         counted: None,
         shutting_down: false,
+        inverter: false,
     };
     match &v.direct {
         Some(Ok((st, nominal))) => {
@@ -245,8 +248,19 @@ fn summarize(v: &View, cfg: &Config) -> Summary {
         s.detail = "Вимкнення за командою з Telegram. Скасувати: /cancel у чаті з ботом.".into();
     } else {
         s.level = Level::Ok;
-        s.title = "Живлення від мережі".into();
-        s.detail = "ПК захищено.".into();
+        if let Some(since) = snap.inverter_since_unix {
+            s.inverter = true;
+            s.title = "Схоже, живлення від інвертора".into();
+            s.detail = format!(
+                "Вхідна напруга вже {} тримається рівно {:.0} В, як від інвертора, а не від мережі. \
+                 ПК захищено.",
+                events::duration_text(snapshot::unix_now().saturating_sub(since) as i64),
+                st.input_v
+            );
+        } else {
+            s.title = "Живлення від мережі".into();
+            s.detail = "ПК захищено.".into();
+        }
     }
     if cfg.temp_alarm_c > 0 && st.temp_c >= cfg.temp_alarm_c as f32 {
         let hot = format!(
@@ -504,7 +518,14 @@ impl GuiApp {
     ) {
         theme::card(ui, "СХЕМА ЖИВЛЕННЯ", |ui| {
             let charge = summary.counted.map(|(charge, _)| charge.round() as u32);
-            if diagram::show(ui, st, summary.nominal, self.saved.ups_power_w, charge)
+            if diagram::show(
+                ui,
+                st,
+                summary.nominal,
+                self.saved.ups_power_w,
+                charge,
+                summary.inverter,
+            )
                 && crate::window_on_screen()
             {
                 ctx.request_repaint_after(ANIMATION_FRAME);
