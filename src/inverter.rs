@@ -96,13 +96,13 @@ impl Detector {
         // Mains turning flat on its own is not a switch to the inverter: the
         // flat stretch has to start soon after the input came back.
         let fresh = self.reset_at.is_some_and(|r| first <= r + GRACE_SECS);
-        // Once the inverter's voltage is known, flat input far from it is
-        // quiet mains.
-        let top = self.counts.iter().max_by_key(|&(_, c)| *c).map(|(v, _)| *v);
-        let usual = match (self.usual_v(), top) {
-            (Some(u), Some(top)) => (top - u).abs() <= 1,
-            _ => true,
-        };
+        // Once the inverter's voltage is known, the flat pair of volts has to
+        // hold it: quiet mains at 227/228 V is not an inverter at 226 V.
+        let usual = self.usual_v().is_none_or(|u| {
+            let c = |v: i32| self.counts.get(&v).copied().unwrap_or(0);
+            let pair = (c(u - 1) + c(u)).max(c(u) + c(u + 1));
+            pair as f32 / self.window.len() as f32 >= ENTER
+        });
         match self.since {
             // The flat stretch began with the window, not when it filled.
             None if share >= ENTER && fresh && usual => {
@@ -239,9 +239,13 @@ mod tests {
         assert_eq!(d.usual_v(), Some(226));
         // Flat 229 V after a dropout is now quiet mains...
         assert_eq!(feed(&mut d, 4010, (0..300).map(|_| 229.0)), None);
-        // ...but flat 227 V is still the inverter.
+        // ...and so is 227/228 V, though 227 is next to 226...
         assert_eq!(d.push(5510, 0.0, true), None);
-        assert_eq!(feed(&mut d, 5515, (0..300).map(|_| 227.0)), Some(5515));
+        let quiet = (0..300).map(|i| if i % 2 == 0 { 227.0 } else { 228.0 });
+        assert_eq!(feed(&mut d, 5515, quiet), None);
+        // ...but flat 227 V is still the inverter.
+        assert_eq!(d.push(7015, 0.0, true), None);
+        assert_eq!(feed(&mut d, 7020, (0..300).map(|_| 227.0)), Some(7020));
     }
 
     #[test]
